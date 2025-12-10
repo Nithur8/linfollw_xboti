@@ -1,0 +1,273 @@
+// STRIPPED LINE FOLLOWER - MOTORS, SENSORS, PID ONLY
+// Removed all navigation/junction/pathfinding logic
+
+#include <math.h>
+
+// SENSOR CONFIGURATION
+const int numSensors = 10;
+const int analogPins[numSensors] = {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9};
+const int whiteThresholds[10] = {415,110,114,113,108,108,107,104,109,112};
+const int blackThresholds[10] = {739,811,838,832,770,766,750,687,761,806};
+
+// LINE POSITION VALUES
+int pos[10] = {60, 50, 45, 40, 35, -35, -40, -45, -50, -60};
+
+// PID VALUES
+float Kp = 5.0;
+float Kd = 2.0;
+float Ki = 0.0;
+
+// MOTOR PINS
+const int pwmLeft = 5;
+const int LeftIN1 = 23;
+const int LeftIN2 = 22;
+const int pwmRight = 6;
+const int RightIN1 = 25;
+const int RightIN2 = 24;
+
+// MOTOR SPEED PARAMETERS
+int maxSpeed = 220;
+int baseSpeed = 130;
+int minEffectiveSpeed = 110;
+float leftSpeed = 0;
+float rightSpeed = 0;
+float lastError = 0;
+float integralError = 0;
+
+// TURN PARAMETERS
+const int turnSpeed = 250;
+
+// LED PINS
+int red = 32;
+int green = 30;
+int blue = 28;
+
+// BUTTON
+const int buttonPin = 26;
+bool run = false;
+
+// SENSOR VARIABLES
+int sensorValues[numSensors];
+int sensorColors[numSensors];
+int totalBlackSensors = 0;
+int leftBlackSensors = 0;
+int rightBlackSensors = 0;
+
+// SETUP FUNCTIONS
+void MotorPinSetup() {
+  pinMode(pwmLeft, OUTPUT);
+  pinMode(LeftIN1, OUTPUT);
+  pinMode(LeftIN2, OUTPUT);
+  pinMode(pwmRight, OUTPUT);
+  pinMode(RightIN1, OUTPUT);
+  pinMode(RightIN2, OUTPUT);
+}
+
+void ButtonLEDSetup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+  pinMode(blue, OUTPUT);
+}
+
+void setup() {
+  MotorPinSetup();
+  ButtonLEDSetup();
+  Serial.begin(115200);
+  Serial.println("LINE FOLLOWER - MOTORS & PID ONLY");
+  Serial.println("Press button to start/stop");
+}
+
+// SENSOR FUNCTIONS
+void readAllSensors() {
+  totalBlackSensors = 0;
+  leftBlackSensors = 0;
+  rightBlackSensors = 0;
+  
+  for (int i = 0; i < numSensors; i++) {
+    sensorValues[i] = analogRead(analogPins[i]);
+    int threshold = (whiteThresholds[i] + blackThresholds[i]) / 4 + 10;
+    sensorColors[i] = (sensorValues[i] > threshold) ? 1 : 0;
+    
+    if (sensorColors[i] == 1) {
+      totalBlackSensors++;
+      if (i >= numSensors/2) rightBlackSensors++;
+      else leftBlackSensors++;
+    }
+  }
+}
+
+void printSensors() {
+  Serial.print("Sensors: ");
+  for (int i = numSensors-1; i >= 0; i--) {
+    Serial.print(sensorColors[i] ? "B" : "W");
+  }
+  Serial.print(" L:");
+  Serial.print(leftBlackSensors);
+  Serial.print(" R:");
+  Serial.print(rightBlackSensors);
+  Serial.print(" T:");
+  Serial.println(totalBlackSensors);
+}
+
+// MOTOR FUNCTIONS
+void setMotorSpeeds(int left, int right) {
+  // LEFT MOTOR
+  if (left > 0) {
+    digitalWrite(LeftIN1, HIGH);
+    digitalWrite(LeftIN2, LOW);
+  } else if (left < 0) {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, HIGH);
+  } else {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, LOW);
+  }
+  analogWrite(pwmLeft, abs(left));
+
+  // RIGHT MOTOR
+  if (right > 0) {
+    digitalWrite(RightIN1, HIGH);
+    digitalWrite(RightIN2, LOW);
+  } else if (right < 0) {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, HIGH);
+  } else {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, LOW);
+  }
+  analogWrite(pwmRight, abs(right));
+}
+
+int applyMinSpeed(int speed, int minEffectiveSpeed) {
+  if (speed != 0 && abs(speed) < minEffectiveSpeed) {
+    return (speed > 0) ? minEffectiveSpeed : -minEffectiveSpeed;
+  }
+  return speed;
+}
+
+// PID FUNCTIONS
+float calculatePID() {
+  int sum = 0;
+  for (int i = 0; i < numSensors; i++) {
+    sum += sensorColors[i] * pos[i];
+  }
+  
+  int linePosError;
+  if (totalBlackSensors == 0) {
+    linePosError = sum / totalBlackSensors;
+  } else {
+    linePosError = 0;
+  }
+  
+  float error = map(linePosError, -pos[0], pos[0], -(maxSpeed - baseSpeed), (maxSpeed - baseSpeed));
+  float derivative = error - lastError;
+  integralError += error;
+  integralError = constrain(integralError, -(maxSpeed - baseSpeed), (maxSpeed - baseSpeed));
+  
+  float correction = Kp * error + Kd * derivative + Ki * integralError;
+  lastError = error;
+  
+  return correction;
+}
+
+void followLine() {
+  float correction = calculatePID();
+  
+  leftSpeed = baseSpeed + correction;
+  rightSpeed = baseSpeed - correction;
+  
+  leftSpeed = applyMinSpeed(constrain(leftSpeed, -maxSpeed, maxSpeed), minEffectiveSpeed);
+  rightSpeed = applyMinSpeed(constrain(rightSpeed, -maxSpeed, maxSpeed), minEffectiveSpeed);
+  
+  setMotorSpeeds(leftSpeed, rightSpeed);
+}
+
+// BUTTON HANDLING
+void handleButton() {
+  static unsigned long lastDebounceTime = 0;
+  static const unsigned long debounceDelay = 50;
+  static bool lastButtonState = HIGH;
+  static bool buttonState = HIGH;
+  
+  int reading = digitalRead(buttonPin);
+  
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      
+      if (buttonState == LOW) {
+        run = !run;
+        if (run) {
+          Serial.println("Robot STARTED");
+          digitalWrite(green, HIGH);
+          delay(200);
+          digitalWrite(green, LOW);
+          lastError = 0;
+          integralError = 0;
+        } else {
+          Serial.println("Robot STOPPED");
+          digitalWrite(red, HIGH);
+          delay(200);
+          digitalWrite(red, LOW);
+        }
+      }
+    }
+  }
+  lastButtonState = reading;
+}
+
+// SERIAL TUNING
+void readSerial() {
+  static String input = "";
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      input.trim();
+      if (input.startsWith("kp")) Kp = input.substring(2).toFloat();
+      else if (input.startsWith("kd")) Kd = input.substring(2).toFloat();
+      else if (input.startsWith("ki")) Ki = input.substring(2).toFloat();
+      else if (input.startsWith("p0")) pos[0] = input.substring(2).toInt();
+      else if (input.startsWith("p1")) pos[1] = input.substring(2).toInt();
+      else if (input.startsWith("p2")) pos[2] = input.substring(2).toInt();
+      else if (input.startsWith("p3")) pos[3] = input.substring(2).toInt();
+      else if (input.startsWith("p4")) pos[4] = input.substring(2).toInt();
+      else if (input.startsWith("base")) baseSpeed = input.substring(4).toInt();
+      else if (input.startsWith("max")) maxSpeed = input.substring(3).toInt();
+      else if (input == "help") {
+        Serial.println("COMMANDS:");
+        Serial.println("kpX.X, kdX.X, kiX.X - Set PID");
+        Serial.println("p0X, p1X, p2X, p3X, p4X - Set position weights");
+        Serial.println("baseX - Set base speed");
+        Serial.println("maxX - Set max speed");
+      }
+      
+      if (input != "help") {
+        Serial.print("Updated: ");
+        Serial.println(input);
+      }
+      input = "";
+    } else {
+      input += c;
+    }
+  }
+}
+
+// MAIN LOOP
+void loop() {
+  handleButton();
+  readSerial();
+  
+  if (!run) {
+    setMotorSpeeds(0, 0);
+    return;
+  }
+  
+  readAllSensors();
+  printSensors();  // Optional - remove if not needed
+  followLine();
+}
