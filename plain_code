@@ -1,5 +1,5 @@
-// STRIPPED LINE FOLLOWER - MOTORS, SENSORS, PID ONLY
-// Removed all navigation/junction/pathfinding logic
+// STRIPPED LINE FOLLOWER - MOTORS, SENSORS, PID + JUNCTION DETECTION
+// Removed navigation/pathfinding logic - kept junction detection only
 
 #include <math.h>
 
@@ -8,6 +8,16 @@ const int numSensors = 10;
 const int analogPins[numSensors] = {A0, A1, A2, A3, A4, A5, A6, A7, A8, A9};
 const int whiteThresholds[10] = {415,110,114,113,108,108,107,104,109,112};
 const int blackThresholds[10] = {739,811,838,832,770,766,750,687,761,806};
+
+// JUNCTION TYPES
+enum JunctionType {
+  NOJUNCTION = 0,
+  TJUNCTION = 1,
+  FOURWAY = 2,
+  LEFTTURN = 3,
+  RIGHTTURN = 4,
+  DEADEND = 5
+};
 
 // LINE POSITION VALUES
 int pos[10] = {60, 50, 45, 40, 35, -35, -40, -45, -50, -60};
@@ -36,6 +46,7 @@ float integralError = 0;
 
 // TURN PARAMETERS
 const int turnSpeed = 250;
+const unsigned long turnTimeout = 3000;
 
 // LED PINS
 int red = 32;
@@ -52,6 +63,10 @@ int sensorColors[numSensors];
 int totalBlackSensors = 0;
 int leftBlackSensors = 0;
 int rightBlackSensors = 0;
+
+// JUNCTION DETECTION VARIABLES
+unsigned long lastJunctionTime = 0;
+const unsigned long junctionDebounceTime = 1500;
 
 // SETUP FUNCTIONS
 void MotorPinSetup() {
@@ -74,7 +89,7 @@ void setup() {
   MotorPinSetup();
   ButtonLEDSetup();
   Serial.begin(115200);
-  Serial.println("LINE FOLLOWER - MOTORS & PID ONLY");
+  Serial.println("LINE FOLLOWER - MOTORS, PID + JUNCTION DETECTION");
   Serial.println("Press button to start/stop");
 }
 
@@ -183,6 +198,97 @@ void followLine() {
   setMotorSpeeds(leftSpeed, rightSpeed);
 }
 
+// JUNCTION DETECTION FUNCTIONS
+JunctionType detectJunctionType() {
+  readAllSensors();
+  
+  // Check for dead end first
+  if (totalBlackSensors == 0) {
+    unsigned long startTime = millis();
+    while (millis() - startTime < 300) {
+      readAllSensors();
+      if (totalBlackSensors > 0) return NOJUNCTION;
+      delay(10);
+    }
+    return DEADEND;
+  }
+  
+  // Check for high sensor count (T or 4-way)
+  if (totalBlackSensors >= 6) {
+    float startX = 0; // Placeholder - no encoders
+    float startY = 0;
+    setMotorSpeeds(100, 100);
+    delay(250);
+    readAllSensors();
+    
+    JunctionType result = NOJUNCTION;
+    if (totalBlackSensors == 0) {
+      // No line ahead - T-junction
+      result = TJUNCTION;
+    } else if (totalBlackSensors >= 5) {
+      result = FOURWAY;
+    } else {
+      result = NOJUNCTION;
+    }
+    
+    setMotorSpeeds(-100, -100);
+    delay(250);
+    return result;
+  }
+  
+  // Check for turn-only junctions
+  if (leftBlackSensors >= 3 && rightBlackSensors == 1) {
+    return LEFTTURN;
+  }
+  if (rightBlackSensors >= 3 && leftBlackSensors == 1) {
+    return RIGHTTURN;
+  }
+  
+  return NOJUNCTION;
+}
+
+bool isDeadEnd() {
+  readAllSensors();
+  if (totalBlackSensors > 0) return false;
+  
+  unsigned long lostTime = millis();
+  for (int attempt = 0; attempt < 3; attempt++) {
+    setMotorSpeeds(-100, 100);
+    delay(200);
+    readAllSensors();
+    if (totalBlackSensors > 0) return false;
+    
+    setMotorSpeeds(100, -100);
+    delay(400);
+    readAllSensors();
+    if (totalBlackSensors > 0) return false;
+    
+    setMotorSpeeds(-100, 100);
+    delay(200);
+  }
+  return true;
+}
+
+bool isLineLost() {
+  return totalBlackSensors == 0;
+}
+
+// TURN FUNCTIONS (Utility - no navigation logic)
+void fineTuneAlignment() {
+  setMotorSpeeds(80, 80);
+  delay(150);
+  readAllSensors();
+  if (leftBlackSensors > rightBlackSensors + 2) {
+    setMotorSpeeds(50, 100);
+    delay(50);
+  } else if (rightBlackSensors > leftBlackSensors + 2) {
+    setMotorSpeeds(100, 50);
+    delay(50);
+  }
+  setMotorSpeeds(0, 0);
+  delay(50);
+}
+
 // BUTTON HANDLING
 void handleButton() {
   static unsigned long lastDebounceTime = 0;
@@ -221,7 +327,7 @@ void handleButton() {
   lastButtonState = reading;
 }
 
-// SERIAL TUNING
+// SERIAL TUNING (Extended for junction testing)
 void readSerial() {
   static String input = "";
   while (Serial.available()) {
@@ -238,15 +344,28 @@ void readSerial() {
       else if (input.startsWith("p4")) pos[4] = input.substring(2).toInt();
       else if (input.startsWith("base")) baseSpeed = input.substring(4).toInt();
       else if (input.startsWith("max")) maxSpeed = input.substring(3).toInt();
+      else if (input == "testjunct") {
+        Serial.println("Testing junction detection...");
+        JunctionType jtype = detectJunctionType();
+        Serial.print("Junction: ");
+        switch(jtype) {
+          case NOJUNCTION: Serial.println("NOJUNCTION"); break;
+          case TJUNCTION: Serial.println("T-JUNCTION"); break;
+          case FOURWAY: Serial.println("4-WAY"); break;
+          case LEFTTURN: Serial.println("LEFT TURN"); break;
+          case RIGHTTURN: Serial.println("RIGHT TURN"); break;
+          case DEADEND: Serial.println("DEAD END"); break;
+        }
+      }
       else if (input == "help") {
         Serial.println("COMMANDS:");
         Serial.println("kpX.X, kdX.X, kiX.X - Set PID");
-        Serial.println("p0X, p1X, p2X, p3X, p4X - Set position weights");
-        Serial.println("baseX - Set base speed");
-        Serial.println("maxX - Set max speed");
+        Serial.println("p0X-p4X - Set position weights");
+        Serial.println("baseX, maxX - Set speeds");
+        Serial.println("testjunct - Test junction detection");
       }
       
-      if (input != "help") {
+      if (input != "help" && input != "testjunct") {
         Serial.print("Updated: ");
         Serial.println(input);
       }
@@ -268,6 +387,26 @@ void loop() {
   }
   
   readAllSensors();
-  printSensors();  // Optional - remove if not needed
+  printSensors();
+  
+  // Your custom logic here - junction detection available:
+  if (millis() - lastJunctionTime > junctionDebounceTime) {
+    JunctionType junction = detectJunctionType();
+    if (junction != NOJUNCTION) {
+      Serial.print("JUNCTION DETECTED: ");
+      switch(junction) {
+        case TJUNCTION: Serial.println("T"); break;
+        case FOURWAY: Serial.println("4WAY"); break;
+        case LEFTTURN: Serial.println("L"); break;
+        case RIGHTTURN: Serial.println("R"); break;
+        case DEADEND: Serial.println("DEAD"); break;
+      }
+      lastJunctionTime = millis();
+      // Add your junction handling logic here
+      setMotorSpeeds(0, 0); // Stop at junction
+      delay(500); // Your custom delay/handling
+    }
+  }
+  
   followLine();
 }
