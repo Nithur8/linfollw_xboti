@@ -1,15 +1,12 @@
+// === Line-follow / maze robot (fixed compilation) ===
+
 // SENSOR CONFIGURATION
 const int numSensors = 10;
 const int analogPins[numSensors] = { A0, A1, A2, A3, A4, A5, A6, A7, A8, A9 };
+
+// If these are calibrated values, keep them. I use them as provided.
 const int whiteThresholds[10] = { 415, 110, 114, 113, 108, 108, 107, 104, 109, 112 };
 const int blackThresholds[10] = { 739, 811, 838, 832, 770, 766, 750, 687, 761, 806 };
-
-int leftCenterReading;
-int leftNearReading;
-int leftFarReading;
-int rightCenterReading;
-int rightNearReading;
-int rightFarReading;
 
 // MOTOR PINS
 const int pwmLeft = 5;
@@ -19,11 +16,13 @@ const int pwmRight = 6;
 const int RightIN1 = 25;
 const int RightIN2 = 24;
 
+// speeds
 int base_speed = 200;
 int adjust_speed = 150;
 int turn_speed = 120;
 
-#define leaptime 200;
+#define leaptime 200
+
 // LED PINS
 int red = 32;
 int green = 30;
@@ -31,16 +30,88 @@ int blue = 28;
 
 // BUTTON
 const int buttonPin = 26;
-bool run = false;
+bool runFlag = false;
 
-// SENSOR VARIABLES
+// SENSOR STATE VARIABLES
 int sensorValues[numSensors];
-int sensorColors[numSensors];
+int sensorColors[numSensors]; // 1 = black (line), 0 = white
 int totalBlackSensors = 0;
 int leftBlackSensors = 0;
 int rightBlackSensors = 0;
 
-// SETUP FUNCTIONS
+int leftCenterReading = 0;
+int leftNearReading = 0;
+int leftFarReading = 0;
+int rightCenterReading = 0;
+int rightNearReading = 0;
+int rightFarReading = 0;
+
+// simple path memory placeholders (so 'done()' compiles)
+char path[200];
+int pathLength = 0;
+int replaystage = 0;
+
+void MotorPinSetup();
+void ButtonLEDSetup();
+void handleButton();
+void readSerial3();
+void readSensors();
+void straight();
+void done();
+void turnByAngle(float angle);
+void leftHandWall();
+void replay();
+void turnAround();
+
+struct Node {
+  char type;        // 'T' normal T, 'L' = tl (T-left), 'R' = tr (T-right), '4' = 4-way
+  int stage;        // which attempt we are on (0,1,2...)
+  int approachDir;  // direction robot faced when first entering this junction
+  int straightDir;  // ONLY for 'L' and 'R': the direction of the straight path
+};
+
+Node memoryNodes[50];
+int memIndex = 0;
+
+void setup() {
+  MotorPinSetup();
+  ButtonLEDSetup();
+  Serial3.begin(115200);
+
+  // LED blink to show startup
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(blue, HIGH);
+    delay(100);
+    digitalWrite(blue, LOW);
+    delay(100);
+  }
+
+  Serial3.println("Press button to start/stop");
+}
+
+void loop(){
+  handleButton();
+  readSerial3();
+
+  if (!runFlag) {
+    // robot paused: ensure motors stopped
+    setMotorSpeeds(0, 0);
+    delay(10);
+    return;
+  }
+
+  readSensors();
+
+  // Simple decision in your original code:
+  if (leftFarReading == 0 && rightFarReading == 0 &&
+      (leftCenterReading == 1 || rightCenterReading == 1) ) {
+    straight();
+  } else {
+    leftHandWall();
+  }
+}
+
+// === Setup helpers ===
 void MotorPinSetup() {
   pinMode(pwmLeft, OUTPUT);
   pinMode(LeftIN1, OUTPUT);
@@ -57,8 +128,12 @@ void ButtonLEDSetup() {
   pinMode(blue, OUTPUT);
 }
 
-// MOTOR FUNCTIONS
+// === Motor abstraction ===
 void setMotorSpeeds(int left, int right) {
+  // constrain PWM
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+
   // LEFT MOTOR
   if (left > 0) {
     digitalWrite(LeftIN1, HIGH);
@@ -86,108 +161,82 @@ void setMotorSpeeds(int left, int right) {
   analogWrite(pwmRight, abs(right));
 }
 
-void loop();
-void handleButton();
-void readSerial3();
-
-struct Node {
-  char type;        // 'T' normal T, 'L' = tl (T-left), 'R' = tr (T-right), '4' = 4-way
-  int stage;        // which attempt we are on (0,1,2...)
-  int approachDir;  // direction robot faced when first entering this junction
-  int straightDir;  // ONLY for 'L' and 'R': the direction of the straight path
-};
-
-Node memory[50];
-int memIndex = 0;
-
-
-void setup() {
-  MotorPinSetup();
-  ButtonLEDSetup();
-  Serial3.begin(115200);
-
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(blue, HIGH);
-    delay(100);
-    digitalWrite(blue, LOW);
-    delay(100);
+// === Input / Serial ===
+void readSerial3() {
+  // placeholder: read serial commands if you want control via Serial3
+  if (Serial3.available()) {
+    String s = Serial3.readStringUntil('\n');
+    s.trim();
+    if (s == "stop") { runFlag = false; Serial3.println("Stopped"); }
+    else if (s == "start") { runFlag = true; Serial3.println("Started"); }
+    // add other commands if needed
   }
-
-  Serial3.println("Press button to start/stop65765757");
- 
 }
 
-
-void loop(){
-  
-  handleButton();
-  readSerial3();
-  readSensors();                                                                                     
- 
- if(leftFarReading == 0 && rightFarReading == 0 && 
-   (leftCenterReading == 1 || rightCenterReading == 1) ){ 
-    straight();                                                                                      
+void handleButton() {
+  static unsigned long lastDebounce = 0;
+  static bool lastState = HIGH;
+  bool curr = digitalRead(buttonPin); // INPUT_PULLUP -> pressed = LOW
+  if (curr != lastState) {
+    lastDebounce = millis();
+    lastState = curr;
   }
-  else{                                                                                              
-    leftHandWall();                                                                                   
+  if (millis() - lastDebounce > 50) {
+    // stable
+    if (curr == LOW && !runFlag) {
+      runFlag = true;
+      digitalWrite(green, HIGH);
+      digitalWrite(red, LOW);
+      Serial3.println("Run ON");
+      delay(200); // simple debounce / single toggle behavior
+    } else if (curr == LOW && runFlag) {
+      runFlag = false;
+      digitalWrite(green, LOW);
+      digitalWrite(red, HIGH);
+      Serial3.println("Run OFF");
+      delay(200);
+    }
   }
-
 }
+
+// === Sensors ===
 void readSensors(){
-
+  totalBlackSensors = 0;
+  leftBlackSensors = 0;
+  rightBlackSensors = 0;
 
   for (int i = 0; i < numSensors; i++) {
     sensorValues[i] = analogRead(analogPins[i]);
-    int threshold = (whiteThresholds[i] + blackThresholds[i]) / 4 + 10;
-    sensorColors[i] = (sensorValues[i] > threshold) ? 1 : 0;
-  }
-  ///right side sensor
-  if(sensorColors[0]==1 || sensorColors[1]==1){
-    rightFarReading = 1;
-  }
-  else{
-    rightFarReading = 0;
+    // threshold --- original code used /4 +10 (probably a bug). Use midpoint:
+    int threshold = (whiteThresholds[i] + blackThresholds[i]) / 2;
+    sensorColors[i] = (sensorValues[i] > threshold) ? 1 : 0; // 1 means black/line as original
+    if (sensorColors[i]) totalBlackSensors++;
   }
 
-  if(sensorColors[2]==1 || sensorColors[3]==1){
-    rightCenterReading = 1;
-  }
-  else{
-    rightCenterReading = 0;
-  }
-
+  // Map sensorColors into the named logical readings
+  // Right side sensors: indexes 0..4 (based on your code usage)
+  rightFarReading = (sensorColors[0] == 1 || sensorColors[1] == 1) ? 1 : 0;
+  rightCenterReading = (sensorColors[2] == 1 || sensorColors[3] == 1) ? 1 : 0;
   rightNearReading = sensorColors[4];
 
-
-  // left side sensor
-  if(sensorColors[8]==1 || sensorColors[9]==1){
-    leftFarReading = 1;
-  }
-  else{
-    leftFarReading = 0;
-  }
-
-  if(sensorColors[6]==1 || sensorColors[7]==1){
-    leftCenterReading = 1;
-  }
-  else{
-    leftCenterReading = 0;
-  }
-
-  lefttNearReading = sensorColors[5];
-
+  // Left side sensors: indexes 5..9
+  leftNearReading = sensorColors[5];
+  leftCenterReading = (sensorColors[6] == 1 || sensorColors[7] == 1) ? 1 : 0;
+  leftFarReading = (sensorColors[8] == 1 || sensorColors[9] == 1) ? 1 : 0;
 }
 
+// === Movement behaviors ===
 void straight(){
   readSensors();
-  if(leftCenterReading == 0){
+  if (leftCenterReading == 0){
     setMotorSpeeds(base_speed, base_speed);
     delay(10);
+    // small corrective turn
     setMotorSpeeds(150,-150);
     delay(15);
   }
   readSensors();
-   if(rightCenterReading == 0){
+  if (rightCenterReading == 0){
     setMotorSpeeds(base_speed, base_speed);
     delay(10);
     setMotorSpeeds(-150,150);
@@ -198,122 +247,128 @@ void straight(){
   delay(4);
   setMotorSpeeds(-base_speed, -base_speed);
   delay(2);
-
 }
 
 void done(){
-  digitalWrite(leftMotor1, LOW);
-    digitalWrite(leftMotor2, LOW);
-    digitalWrite(rightMotor1, LOW);
-    digitalWrite(rightMotor2, LOW);
-  replaystage=1;
-  path[pathLength]='D';
-  pathLength++;
- while(analogRead(leftFarSensor) == 1){
-   digitalWrite(led, LOW);
-   delay(150);
-   digitalWrite(led, HIGH);
-   delay(150);
- }
- delay(500);
+  // Stop motors
+  setMotorSpeeds(0,0);
+
+  // Update replay state & path (simple placeholders)
+  replaystage = 1;
+  if (pathLength < (int)sizeof(path) - 1) {
+    path[pathLength] = 'D';
+    pathLength++;
+  }
+
+  // Blink red while the leftFarReading indicates still on that sensor (tuned to your logic)
+  readSensors();
+  while (leftFarReading == 1) {
+    digitalWrite(red, LOW);
+    delay(150);
+    digitalWrite(red, HIGH);
+    delay(150);
+    readSensors(); // refresh the sensor values inside loop
+  }
+  delay(500);
   replay();
 }
 
 void turnByAngle(float angle) {
-
-  // You must calibrate this for your bot:
-  float countsPerDegree = 3.0; 
-  long target = abs(angle) * countsPerDegree;
-  turn_speed = 140;
-  leftCount = 0;
-  rightCount = 0;
+  // Simple timed-turn implementation (replace with encoder-based for better accuracy)
+  // You should calibrate timePerDegree for your robot. I use a placeholder here.
+  const float timePerDegree = 8.0; // milliseconds per degree, tune this!
+  unsigned long dur = (unsigned long)(abs(angle) * timePerDegree);
 
   if (angle > 0) {
     // Turn RIGHT: left wheel forward, right wheel backward
     setMotorSpeeds(turn_speed, -turn_speed);
   } else {
-    // Turn LEFT: left wheel backward, right wheel forward
+    // Turn LEFT
     setMotorSpeeds(-turn_speed, turn_speed);
   }
 
-  while (abs(leftCount) < target && abs(rightCount) < target) {
-    // keep turning until both wheels hit target
-  }
-
-  rotate_motor(0, 0);
+  delay(dur);
+  // stop
+  setMotorSpeeds(0,0);
 }
 
 void leftHandWall(){
-  
+  readSensors();
 
-  if( leftFarReading == 1 && rightFarReading == 1){
-    digitalWrite(leftMotor1, HIGH);
-    digitalWrite(leftMotor2, LOW);
-    digitalWrite(rightMotor1, HIGH);
-    digitalWrite(rightMotor2, LOW);
+  if ( leftFarReading == 1 && rightFarReading == 1){
+    // move forward a bit
+    setMotorSpeeds(base_speed, base_speed);
     delay(leaptime);
     readSensors();
-    
+
     if(leftFarReading == 1 || rightFarReading == 1){
       done();
+      return;
     }
-    if(leftFarReading == 0 && rightFarReading == 0){ 
+    if(leftFarReading == 0 && rightFarReading == 0){
       turnByAngle(-90);
+      return;
     }
-    
   }
-  
+
   if(leftFarReading == 1){ // if you can turn left then turn left
-    digitalWrite(leftMotor1, HIGH);
-    digitalWrite(leftMotor2, LOW);
-    digitalWrite(rightMotor1, HIGH);
-    digitalWrite(rightMotor2, LOW);
+    setMotorSpeeds(base_speed, base_speed);
     delay(leaptime);
     readSensors();
-      
-      if(leftFarReading == 0 && rightFarReading == 0){
-        turnByAngle(-90);
-      }
-      else{
-        done();
-      }
+
+    if(leftFarReading == 0 && rightFarReading == 0){
+      turnByAngle(-90);
+      return;
+    } else {
+      done();
+      return;
+    }
   }
-   
+
   if(rightFarReading == 1){
-    digitalWrite(leftMotor1, HIGH);
-    digitalWrite(leftMotor2, LOW);
-    digitalWrite(rightMotor1, HIGH);
-    digitalWrite(rightMotor2, LOW);
+    setMotorSpeeds(base_speed, base_speed);
     delay(30);
     readSensors();
-    
+
     if(leftFarReading == 1){
-      delay(leaptime-30);
+      delay(leaptime - 30);
       readSensors();
-      
+
       if(rightFarReading == 1 && leftFarReading == 1){
         done();
-      }
-      else{
+        return;
+      } else {
         turnByAngle(-90);
         return;
       }
     }
-    delay(leaptime-30);
+    delay(leaptime - 30);
     readSensors();
     if(leftFarReading == 0 && leftCenterReading == 0 &&
-      rightCenterReading == 0 && rightFarReading == 0){
+       rightCenterReading == 0 && rightFarReading == 0){
       turnByAngle(90);
       return;
     }
-   
+
     straight();
+    return;
   }
+
   readSensors();
-  if(leftFarReading == 0 && leftCenterReading == 0 && rightCenterReading == 0 
-    && rightFarReading == 0 && leftNearReading == 0 && rightNearReading == 0){
+  if(leftFarReading == 0 && leftCenterReading == 0 && rightCenterReading == 0
+     && rightFarReading == 0 && leftNearReading == 0 && rightNearReading == 0){
     turnAround();
   }
-
 }
 
+// === Stubs / placeholders ===
+void replay() {
+  // Placeholder for replay logic (path replay/backtracking)
+  Serial3.println("Replay called (stub).");
+  // implement your replay routine here
+}
+
+void turnAround() {
+  // use turnByAngle 180 for a simple turn-around
+  turnByAngle(180);
+}
