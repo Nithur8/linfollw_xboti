@@ -1,0 +1,319 @@
+// SENSOR CONFIGURATION
+const int numSensors = 10;
+const int analogPins[numSensors] = { A0, A1, A2, A3, A4, A5, A6, A7, A8, A9 };
+const int whiteThresholds[10] = { 415, 110, 114, 113, 108, 108, 107, 104, 109, 112 };
+const int blackThresholds[10] = { 739, 811, 838, 832, 770, 766, 750, 687, 761, 806 };
+
+int leftCenterReading;
+int leftNearReading;
+int leftFarReading;
+int rightCenterReading;
+int rightNearReading;
+int rightFarReading;
+
+// MOTOR PINS
+const int pwmLeft = 5;
+const int LeftIN1 = 23;
+const int LeftIN2 = 22;
+const int pwmRight = 6;
+const int RightIN1 = 25;
+const int RightIN2 = 24;
+
+int base_speed = 200;
+int adjust_speed = 150;
+int turn_speed = 120;
+
+#define leaptime 200;
+// LED PINS
+int red = 32;
+int green = 30;
+int blue = 28;
+
+// BUTTON
+const int buttonPin = 26;
+bool run = false;
+
+// SENSOR VARIABLES
+int sensorValues[numSensors];
+int sensorColors[numSensors];
+int totalBlackSensors = 0;
+int leftBlackSensors = 0;
+int rightBlackSensors = 0;
+
+// SETUP FUNCTIONS
+void MotorPinSetup() {
+  pinMode(pwmLeft, OUTPUT);
+  pinMode(LeftIN1, OUTPUT);
+  pinMode(LeftIN2, OUTPUT);
+  pinMode(pwmRight, OUTPUT);
+  pinMode(RightIN1, OUTPUT);
+  pinMode(RightIN2, OUTPUT);
+}
+
+void ButtonLEDSetup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+  pinMode(blue, OUTPUT);
+}
+
+// MOTOR FUNCTIONS
+void setMotorSpeeds(int left, int right) {
+  // LEFT MOTOR
+  if (left > 0) {
+    digitalWrite(LeftIN1, HIGH);
+    digitalWrite(LeftIN2, LOW);
+  } else if (left < 0) {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, HIGH);
+  } else {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, LOW);
+  }
+  analogWrite(pwmLeft, abs(left));
+
+  // RIGHT MOTOR
+  if (right > 0) {
+    digitalWrite(RightIN1, HIGH);
+    digitalWrite(RightIN2, LOW);
+  } else if (right < 0) {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, HIGH);
+  } else {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, LOW);
+  }
+  analogWrite(pwmRight, abs(right));
+}
+
+void loop();
+void handleButton();
+void readSerial3();
+
+struct Node {
+  char type;        // 'T' normal T, 'L' = tl (T-left), 'R' = tr (T-right), '4' = 4-way
+  int stage;        // which attempt we are on (0,1,2...)
+  int approachDir;  // direction robot faced when first entering this junction
+  int straightDir;  // ONLY for 'L' and 'R': the direction of the straight path
+};
+
+Node memory[50];
+int memIndex = 0;
+
+
+void setup() {
+  MotorPinSetup();
+  ButtonLEDSetup();
+  Serial3.begin(115200);
+
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(blue, HIGH);
+    delay(100);
+    digitalWrite(blue, LOW);
+    delay(100);
+  }
+
+  Serial3.println("Press button to start/stop65765757");
+ 
+}
+
+
+void loop(){
+  
+  handleButton();
+  readSerial3();
+  readSensors();                                                                                     
+ 
+ if(leftFarReading == 0 && rightFarReading == 0 && 
+   (leftCenterReading == 1 || rightCenterReading == 1) ){ 
+    straight();                                                                                      
+  }
+  else{                                                                                              
+    leftHandWall();                                                                                   
+  }
+
+}
+void readSensors(){
+
+
+  for (int i = 0; i < numSensors; i++) {
+    sensorValues[i] = analogRead(analogPins[i]);
+    int threshold = (whiteThresholds[i] + blackThresholds[i]) / 4 + 10;
+    sensorColors[i] = (sensorValues[i] > threshold) ? 1 : 0;
+  }
+  ///right side sensor
+  if(sensorColors[0]==1 || sensorColors[1]==1){
+    rightFarReading = 1;
+  }
+  else{
+    rightFarReading = 0;
+  }
+
+  if(sensorColors[2]==1 || sensorColors[3]==1){
+    rightCenterReading = 1;
+  }
+  else{
+    rightCenterReading = 0;
+  }
+
+  rightNearReading = sensorColors[4];
+
+
+  // left side sensor
+  if(sensorColors[8]==1 || sensorColors[9]==1){
+    leftFarReading = 1;
+  }
+  else{
+    leftFarReading = 0;
+  }
+
+  if(sensorColors[6]==1 || sensorColors[7]==1){
+    leftCenterReading = 1;
+  }
+  else{
+    leftCenterReading = 0;
+  }
+
+  lefttNearReading = sensorColors[5];
+
+}
+
+void straight(){
+  readSensors();
+  if(leftCenterReading == 0){
+    setMotorSpeeds(base_speed, base_speed);
+    delay(10);
+    setMotorSpeeds(150,-150);
+    delay(15);
+  }
+  readSensors();
+   if(rightCenterReading == 0){
+    setMotorSpeeds(base_speed, base_speed);
+    delay(10);
+    setMotorSpeeds(-150,150);
+    delay(15);
+    return;
+  }
+  setMotorSpeeds(base_speed, base_speed);
+  delay(4);
+  setMotorSpeeds(-base_speed, -base_speed);
+  delay(2);
+
+}
+
+void done(){
+  digitalWrite(leftMotor1, LOW);
+    digitalWrite(leftMotor2, LOW);
+    digitalWrite(rightMotor1, LOW);
+    digitalWrite(rightMotor2, LOW);
+  replaystage=1;
+  path[pathLength]='D';
+  pathLength++;
+ while(analogRead(leftFarSensor) == 1){
+   digitalWrite(led, LOW);
+   delay(150);
+   digitalWrite(led, HIGH);
+   delay(150);
+ }
+ delay(500);
+  replay();
+}
+
+void turnByAngle(float angle) {
+
+  // You must calibrate this for your bot:
+  float countsPerDegree = 3.0; 
+  long target = abs(angle) * countsPerDegree;
+  turn_speed = 140;
+  leftCount = 0;
+  rightCount = 0;
+
+  if (angle > 0) {
+    // Turn RIGHT: left wheel forward, right wheel backward
+    setMotorSpeeds(turn_speed, -turn_speed);
+  } else {
+    // Turn LEFT: left wheel backward, right wheel forward
+    setMotorSpeeds(-turn_speed, turn_speed);
+  }
+
+  while (abs(leftCount) < target && abs(rightCount) < target) {
+    // keep turning until both wheels hit target
+  }
+
+  rotate_motor(0, 0);
+}
+
+void leftHandWall(){
+  
+
+  if( leftFarReading == 1 && rightFarReading == 1){
+    digitalWrite(leftMotor1, HIGH);
+    digitalWrite(leftMotor2, LOW);
+    digitalWrite(rightMotor1, HIGH);
+    digitalWrite(rightMotor2, LOW);
+    delay(leaptime);
+    readSensors();
+    
+    if(leftFarReading == 1 || rightFarReading == 1){
+      done();
+    }
+    if(leftFarReading == 0 && rightFarReading == 0){ 
+      turnByAngle(-90);
+    }
+    
+  }
+  
+  if(leftFarReading == 1){ // if you can turn left then turn left
+    digitalWrite(leftMotor1, HIGH);
+    digitalWrite(leftMotor2, LOW);
+    digitalWrite(rightMotor1, HIGH);
+    digitalWrite(rightMotor2, LOW);
+    delay(leaptime);
+    readSensors();
+      
+      if(leftFarReading == 0 && rightFarReading == 0){
+        turnByAngle(-90);
+      }
+      else{
+        done();
+      }
+  }
+   
+  if(rightFarReading == 1){
+    digitalWrite(leftMotor1, HIGH);
+    digitalWrite(leftMotor2, LOW);
+    digitalWrite(rightMotor1, HIGH);
+    digitalWrite(rightMotor2, LOW);
+    delay(30);
+    readSensors();
+    
+    if(leftFarReading == 1){
+      delay(leaptime-30);
+      readSensors();
+      
+      if(rightFarReading == 1 && leftFarReading == 1){
+        done();
+      }
+      else{
+        turnByAngle(-90);
+        return;
+      }
+    }
+    delay(leaptime-30);
+    readSensors();
+    if(leftFarReading == 0 && leftCenterReading == 0 &&
+      rightCenterReading == 0 && rightFarReading == 0){
+      turnByAngle(90);
+      return;
+    }
+   
+    straight();
+  }
+  readSensors();
+  if(leftFarReading == 0 && leftCenterReading == 0 && rightCenterReading == 0 
+    && rightFarReading == 0 && leftNearReading == 0 && rightNearReading == 0){
+    turnAround();
+  }
+
+}
+
