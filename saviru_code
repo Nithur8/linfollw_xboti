@@ -1,0 +1,1888 @@
+// ===================================================================
+//          LINE FOLLOWER WITH ENCODER-BASED PATH MEMORY - COMPLETE
+// ===================================================================
+
+// ===================================================================
+//                          CONFIGURATION
+// ===================================================================
+
+bool debug = 1;
+const int numSensors = 10;
+const int analogPins[numSensors] = { A0, A1, A2, A3, A4, A5, A6, A7, A8, A9 };
+
+const int whiteThresholds[10] ={415,110,114,113,108,108,107,104,109,112};
+const int blackThresholds[10] ={739,811,838,832,770,766,750,687,761,806};
+
+// ===================================================================
+//                          ENUMERATIONS
+// ===================================================================
+
+enum JunctionType {
+  NO_JUNCTION = 0,
+  T_JUNCTION = 1,
+  FOUR_WAY = 2,
+  LEFT_TURN = 3,
+  RIGHT_TURN = 4,
+  DEAD_END = 5
+};
+
+enum Direction {
+  UNKNOWN = 0,
+  STRAIGHT = 1,
+  LEFT = 2,
+  RIGHT = 3,
+  BACK = 4
+};
+
+enum RobotState {
+  EXPLORING = 0,
+  RETURNING = 1,
+  AT_JUNCTION = 2,
+  TURNING = 3
+};
+
+// ===================================================================
+//                          ENCODER SETUP
+// ===================================================================
+
+const int encoderLeftPin = 2;
+const int encoderRightPin = 3;
+
+volatile long leftEncoderCount = 0;
+volatile long rightEncoderCount = 0;
+float wheelDiameter = 6.5;
+int encoderTicksPerRevolution = 20;
+
+float wheelCircumference = 0;
+float cmPerTick = 0;
+
+// Distance tracking
+float totalDistanceTraveled = 0;
+float distanceSinceLastJunction = 0;
+
+// Location variables
+float currentX = 0;
+float currentY = 0;
+float currentHeading = 0;
+
+// ===================================================================
+//                          ENHANCED STRUCTURES
+// ===================================================================
+
+const int MAX_PATH_MEMORY = 50;
+
+struct EnhancedPathNode {
+  JunctionType junctionType;
+  Direction takenDirection;
+  bool explored[4];
+  bool visited;
+  unsigned long timestamp;
+  int nodeID;
+  
+  // Enhanced fields
+  float distanceFromStart;
+  float xPosition;
+  float yPosition;
+  float headingAtJunction;
+  Direction availableDirections[4];
+  int adjacentNodes[4];
+  float distanceToAdjacent[4];
+};
+
+struct EnhancedBacktrackStack {
+  int junctionIndex;
+  Direction entryDirection;
+  float distanceToJunction;
+};
+
+// ===================================================================
+//                          GLOBAL VARIABLES
+// ===================================================================
+
+// Sensor variables
+int sensorValues[numSensors] = { 0 };
+int sensorColors[numSensors] = { 0 };
+int totalBlackSensors = 0;
+int leftBlackSensors = 0;
+int rightBlackSensors = 0;
+
+// Line position values
+int pos0 = 60, pos1 = 50, pos2 = 45, pos3 = 40, pos4 = 35;
+int pos[10] = { pos0, pos1, pos2, pos3, pos4, -pos4, -pos3, -pos2, -pos1, -pos0 };
+
+// PID values
+float Kp = 5, Kd = 2, Ki = 0;
+int red = 32, green = 30, blue = 28;
+
+// Motor pins
+const int pwmLeft = 5, LeftIN1 = 23, LeftIN2 = 22;
+const int pwmRight = 6, RightIN1 = 25, RightIN2 = 24;
+
+// Motor speed parameters
+int maxSpeed = 220, base_speed = 130;
+int min_effective_speed = 110;
+float leftSpeed = 0, rightSpeed = 0;
+float lastError = 0, intgralError = 0;
+
+// Turn parameters
+const int turnSpeed = 250;
+const unsigned long turnTimeout = 3000;
+
+// Button control
+const int buttonPin = 26;
+bool run = 0;
+
+// Path memory system
+EnhancedPathNode enhancedPathMemory[MAX_PATH_MEMORY];
+EnhancedBacktrackStack enhancedBacktrackStack[MAX_PATH_MEMORY];
+int currentPathIndex = 0;
+int lastJunctionIndex = -1;
+int nodeCounter = 0;
+int backtrackTop = -1;
+
+// Navigation state
+RobotState currentState = EXPLORING;
+Direction lastMovementDirection = STRAIGHT;
+Direction lastJunctionDirectionTaken = UNKNOWN;
+JunctionType lastJunctionType = NO_JUNCTION;
+bool isFirstJunction = true;
+
+// Junction detection debouncing
+unsigned long lastJunctionTime = 0;
+const unsigned long junctionDebounceTime = 1500;
+int sameJunctionCount = 0;
+int lastJunctionID = -1;
+
+// Dead end detection
+bool deadEndDetected = false;
+unsigned long lineLostTime = 0;
+const unsigned long lineLostTimeout = 500;
+
+// Line lost detection
+unsigned long lineLostStart = 0;
+
+// Navigation timing
+unsigned long lastJunctionEncounterTime = 0;
+float lastJunctionDistance = 0;
+bool isAtKnownJunction = false;
+int currentJunctionIndex = -1;
+
+// Junction detection thresholds
+const float JUNCTION_DISTANCE_TOLERANCE = 50.0;
+const float JUNCTION_POSITION_TOLERANCE = 40.0;
+const float MIN_JUNCTION_DISTANCE = 30.0;
+
+// Debug timing
+unsigned long lastDebugTime = 0;
+
+// ===================================================================
+//                          FUNCTION PROTOTYPES
+// ===================================================================
+
+// Setup functions
+void MotorPinSetup();
+void Button_LEDSetup();
+void setup();
+void setupEncoders();
+
+// Main loop functions
+void loop();
+void handleButton();
+void readSerial3();
+
+// Sensor functions
+void readAllSensors();
+void printArray();
+
+// Motor functions
+void setMotorSpeeds(int left, int right);
+int applyMinSpeed(int speed, int min_effective_speed);
+
+// PID functions
+void followLine();
+float calculatePID();
+
+// Turn functions
+void performLeftTurn();
+void performRightTurn();
+void executeTurn(Direction direction);
+void execute180Turn();
+void fineTuneAlignment();
+
+// Junction detection
+JunctionType detectJunctionType();
+bool isDeadEnd();
+bool isLineLost();
+
+// Encoder functions
+void leftEncoderISR();
+void rightEncoderISR();
+void updateDistance();
+void updateHeadingForTurn(Direction turn);
+int getDirectionIndex(Direction dir);
+Direction getOppositeDirection(Direction dir);
+
+// Enhanced Memory functions
+void initializeEnhancedMemory();
+void recordEnhancedJunction(JunctionType type, Direction taken);
+Direction chooseEnhancedNextDirection(JunctionType junction, int junctionIndex);
+bool isEnhancedDirectionExplored(int junctionIndex, Direction direction);
+void markEnhancedDirectionExplored(int junctionIndex, Direction direction);
+void handleDeadEnd();
+void printEnhancedPathMemory();
+bool isAtKnownJunctionEnhanced();
+
+// Navigation functions
+void handleEnhancedJunction(JunctionType type);
+void enhancedNavigate();
+
+// Enhanced Backtrack functions
+void pushEnhancedBacktrack(int junctionIndex, Direction entryDir);
+bool popEnhancedBacktrack(int &junctionIndex, Direction &entryDir, float &distance);
+void enhancedReturnToLastJunction();
+
+// Calibration functions
+void calibrateEncodersInteractive();
+void testCalibration(float targetDistance);
+
+// ===================================================================
+//                          SETUP FUNCTIONS
+// ===================================================================
+
+void MotorPinSetup() {
+  pinMode(pwmLeft, OUTPUT);
+  pinMode(LeftIN1, OUTPUT);
+  pinMode(LeftIN2, OUTPUT);
+  pinMode(pwmRight, OUTPUT);
+  pinMode(RightIN1, OUTPUT);
+  pinMode(RightIN2, OUTPUT);
+}
+
+void Button_LEDSetup() {
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(red, OUTPUT);
+  pinMode(green, OUTPUT);
+  pinMode(blue, OUTPUT);
+}
+
+void setupEncoders() {
+  pinMode(encoderLeftPin, INPUT_PULLUP);
+  pinMode(encoderRightPin, INPUT_PULLUP);
+  
+  attachInterrupt(digitalPinToInterrupt(encoderLeftPin), leftEncoderISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderRightPin), rightEncoderISR, RISING);
+  
+  // Calculate based on wheel diameter
+  wheelCircumference = PI * wheelDiameter;
+  cmPerTick = wheelCircumference / encoderTicksPerRevolution;
+  
+  Serial3.println("Encoders initialized");
+  Serial3.print("Wheel diameter: ");
+  Serial3.print(wheelDiameter);
+  Serial3.println(" cm");
+  Serial3.print("Circumference: ");
+  Serial3.print(wheelCircumference);
+  Serial3.println(" cm");
+  Serial3.print("Ticks per rev: ");
+  Serial3.println(encoderTicksPerRevolution);
+  Serial3.print("cm per tick: ");
+  Serial3.println(cmPerTick, 4);
+}
+
+void setup() {
+  MotorPinSetup();
+  Button_LEDSetup();
+  Serial3.begin(115200);
+  
+  initializeEnhancedMemory();
+  setupEncoders();
+  
+  for(int i = 0; i < 3; i++) {
+    digitalWrite(blue, HIGH);
+    delay(100);
+    digitalWrite(blue, LOW);
+    delay(100);
+  }
+  
+  Serial3.println("=== ENHANCED LINE FOLLOWER WITH ENCODER MEMORY ===");
+  Serial3.print("Wheel circumference: ");
+  Serial3.print(wheelCircumference);
+  Serial3.println(" cm");
+  Serial3.print("cm per tick: ");
+  Serial3.println(cmPerTick, 4);
+  Serial3.println("Press button to start/stop");
+}
+
+// ===================================================================
+//                          ENCODER FUNCTIONS
+// ===================================================================
+
+void leftEncoderISR() {
+  leftEncoderCount++;
+}
+
+void rightEncoderISR() {
+  rightEncoderCount++;
+}
+
+void updateDistance() {
+  static unsigned long lastUpdate = 0;
+  unsigned long currentTime = millis();
+  
+  if (currentTime - lastUpdate < 100) {
+    return;
+  }
+  
+  lastUpdate = currentTime;
+  
+  if (leftEncoderCount > 0 || rightEncoderCount > 0) {
+    long avgTicks = (leftEncoderCount + rightEncoderCount) / 2;
+    
+    if (abs(leftEncoderCount - rightEncoderCount) > 5) {
+      if (debug) {
+        Serial3.print("Encoder mismatch! L:");
+        Serial3.print(leftEncoderCount);
+        Serial3.print(" R:");
+        Serial3.println(rightEncoderCount);
+      }
+    }
+    
+    float distanceIncrement = avgTicks * cmPerTick;
+    
+    if (distanceIncrement > 100.0) {
+      if (debug) Serial3.println("ERROR: Impossible distance increment!");
+      distanceIncrement = 10.0;
+    }
+    
+    totalDistanceTraveled += distanceIncrement;
+    distanceSinceLastJunction += distanceIncrement;
+    
+    currentX += distanceIncrement * cos(radians(currentHeading));
+    currentY += distanceIncrement * sin(radians(currentHeading));
+    
+    leftEncoderCount = 0;
+    rightEncoderCount = 0;
+    
+    static int distanceDebugCount = 0;
+    distanceDebugCount++;
+    if (distanceDebugCount >= 10 && debug) {
+      distanceDebugCount = 0;
+      Serial3.print("Dist update: +");
+      Serial3.print(distanceIncrement, 1);
+      Serial3.print("cm, Total: ");
+      Serial3.print(totalDistanceTraveled, 1);
+      Serial3.print("cm");
+      Serial3.println();
+    }
+  }
+}
+
+void updateHeadingForTurn(Direction turn) {
+  switch(turn) {
+    case LEFT:
+      currentHeading -= 90;
+      break;
+    case RIGHT:
+      currentHeading += 90;
+      break;
+    case BACK:
+      currentHeading += 180;
+      break;
+    case STRAIGHT:
+      break;
+  }
+  
+  while (currentHeading > 180) currentHeading -= 360;
+  while (currentHeading < -180) currentHeading += 360;
+}
+
+int getDirectionIndex(Direction dir) {
+  switch(dir) {
+    case STRAIGHT: return 0;
+    case LEFT: return 1;
+    case RIGHT: return 2;
+    case BACK: return 3;
+    default: return -1;
+  }
+}
+
+Direction getOppositeDirection(Direction dir) {
+  switch(dir) {
+    case LEFT: return RIGHT;
+    case RIGHT: return LEFT;
+    case STRAIGHT: return BACK;
+    case BACK: return STRAIGHT;
+    default: return UNKNOWN;
+  }
+}
+
+// ===================================================================
+//                          SENSOR FUNCTIONS
+// ===================================================================
+
+void readAllSensors() {
+  totalBlackSensors = 0;
+  leftBlackSensors = 0;
+  rightBlackSensors = 0;
+
+  for (int i = 0; i < numSensors; i++) {
+    sensorValues[i] = analogRead(analogPins[i]);
+    
+    int threshold = float(whiteThresholds[i] + blackThresholds[i]) * 4 / 10;
+    
+    sensorColors[i] = (sensorValues[i] > threshold) ? 1 : 0;
+
+    if (sensorColors[i] == 1) {
+      totalBlackSensors++;
+      if (i < numSensors / 2) {
+        rightBlackSensors++;
+      } else {
+        leftBlackSensors++;
+      }
+    }
+  }
+}
+
+void printArray() {
+  if (debug) {
+    Serial3.print("Sensors: ");
+    for (int i = numSensors - 1; i >= 0; i--) {
+      Serial3.print(sensorColors[i] ? "B" : "_");
+    }
+    Serial3.print(" | L:");
+    Serial3.print(leftBlackSensors);
+    Serial3.print(" R:");
+    Serial3.print(rightBlackSensors);
+    Serial3.print(" T:");
+    Serial3.println(totalBlackSensors);
+  }
+}
+
+// ===================================================================
+//                          MOTOR FUNCTIONS
+// ===================================================================
+
+void setMotorSpeeds(int left, int right) {
+  // LEFT MOTOR
+  if (left > 0) {
+    digitalWrite(LeftIN1, HIGH);
+    digitalWrite(LeftIN2, LOW);
+  } else if (left == 0) {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, LOW);
+  } else {
+    digitalWrite(LeftIN1, LOW);
+    digitalWrite(LeftIN2, HIGH);
+  }
+  analogWrite(pwmLeft, abs(left));
+
+  // RIGHT MOTOR
+  if (right > 0) {
+    digitalWrite(RightIN1, HIGH);
+    digitalWrite(RightIN2, LOW);
+  } else if (right == 0) {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, LOW);
+  } else {
+    digitalWrite(RightIN1, LOW);
+    digitalWrite(RightIN2, HIGH);
+  }
+  analogWrite(pwmRight, abs(right));
+}
+
+int applyMinSpeed(int speed, int min_effective_speed) {
+  if (speed != 0 && abs(speed) < min_effective_speed) {
+    return (speed > 0) ? min_effective_speed : -min_effective_speed;
+  }
+  return speed;
+}
+
+// ===================================================================
+//                          PID FUNCTIONS
+// ===================================================================
+
+float calculatePID() {
+  int sum = 0;
+  for (int i = 0; i < numSensors; i++) {
+    sum += sensorColors[i] * pos[i];
+  }
+  
+  int linePosError;
+  if (totalBlackSensors > 0) {
+    linePosError = sum / totalBlackSensors;
+  } else {
+    linePosError = 0;
+  }
+  
+  float error = map(linePosError, -pos0, pos0,
+                    -(maxSpeed - base_speed),
+                    (maxSpeed - base_speed));
+  
+  float derivative = error - lastError;
+  intgralError += error;
+  
+  intgralError = constrain(intgralError,
+                           -(maxSpeed - base_speed),
+                           (maxSpeed - base_speed));
+  
+  float correction = Kp * error + Kd * derivative + Ki * intgralError;
+  lastError = error;
+  
+  return correction;
+}
+
+void followLine() {
+  float correction = calculatePID();
+  
+  leftSpeed = base_speed - 5 + correction;
+  rightSpeed = base_speed - correction;
+  
+  leftSpeed = applyMinSpeed(constrain(leftSpeed, -maxSpeed, maxSpeed), min_effective_speed);
+  rightSpeed = applyMinSpeed(constrain(rightSpeed, -maxSpeed, maxSpeed), min_effective_speed);
+  
+  setMotorSpeeds(leftSpeed, rightSpeed);
+}
+
+// ===================================================================
+//                          TURN FUNCTIONS
+// ===================================================================
+
+void performLeftTurn() {
+  if (debug) Serial3.println("Performing LEFT turn");
+  
+  digitalWrite(green, HIGH);
+  
+  setMotorSpeeds(0, 0);
+  delay(100);
+  
+  unsigned long turnStart = millis();
+  bool lineFound = false;
+  
+  setMotorSpeeds(-turnSpeed, turnSpeed);
+  
+  while (millis() - turnStart < turnTimeout && !lineFound) {
+    readAllSensors();
+    
+    if (rightBlackSensors >= 2 && leftBlackSensors <= 1) {
+      lineFound = true;
+    }
+    delay(10);
+  }
+  
+  fineTuneAlignment();
+  
+  setMotorSpeeds(0, 0);
+  delay(100);
+  
+  digitalWrite(green, LOW);
+  
+  intgralError = 0;
+  lastError = 0;
+  
+  if (debug) Serial3.println("Left turn completed");
+}
+
+void performRightTurn() {
+  if (debug) Serial3.println("Performing RIGHT turn");
+  
+  digitalWrite(green, HIGH);
+  
+  setMotorSpeeds(0, 0);
+  delay(100);
+  
+  unsigned long turnStart = millis();
+  bool lineFound = false;
+  
+  setMotorSpeeds(turnSpeed, -turnSpeed);
+  
+  while (millis() - turnStart < turnTimeout && !lineFound) {
+    readAllSensors();
+    
+    if (leftBlackSensors >= 2 && rightBlackSensors <= 1) {
+      lineFound = true;
+    }
+    delay(10);
+  }
+  
+  fineTuneAlignment();
+  
+  setMotorSpeeds(0, 0);
+  delay(100);
+  
+  digitalWrite(green, LOW);
+  
+  intgralError = 0;
+  lastError = 0;
+  
+  if (debug) Serial3.println("Right turn completed");
+}
+
+void executeTurn(Direction direction) {
+  if (debug) {
+    Serial3.print("Executing turn: ");
+    switch(direction) {
+      case LEFT: Serial3.println("LEFT"); break;
+      case RIGHT: Serial3.println("RIGHT"); break;
+      case STRAIGHT: Serial3.println("STRAIGHT"); break;
+      case BACK: Serial3.println("BACK (180)"); break;
+      default: Serial3.println("UNKNOWN"); break;
+    }
+  }
+  
+  currentState = TURNING;
+  
+  switch(direction) {
+    case LEFT:
+      performLeftTurn();
+      lastMovementDirection = LEFT;
+      break;
+      
+    case RIGHT:
+      performRightTurn();
+      lastMovementDirection = RIGHT;
+      break;
+      
+    case STRAIGHT:
+      setMotorSpeeds(150, 150);
+      delay(300);
+      lastMovementDirection = STRAIGHT;
+      break;
+      
+    case BACK:
+      execute180Turn();
+      lastMovementDirection = BACK;
+      break;
+      
+    default:
+      setMotorSpeeds(150, 150);
+      delay(300);
+      lastMovementDirection = STRAIGHT;
+      break;
+  }
+  
+  currentState = EXPLORING;
+}
+
+void execute180Turn() {
+  if (debug) Serial3.println("Executing 180 degree turn");
+  
+  digitalWrite(red, HIGH);
+  
+  setMotorSpeeds(0, 0);
+  delay(200);
+  
+  setMotorSpeeds(-turnSpeed, turnSpeed);
+  delay(650);
+  
+  unsigned long alignStart = millis();
+  while (millis() - alignStart < 1000) {
+    readAllSensors();
+    if (totalBlackSensors > 0) {
+      fineTuneAlignment();
+      break;
+    }
+    delay(10);
+  }
+  
+  setMotorSpeeds(0, 0);
+  delay(100);
+  
+  digitalWrite(red, LOW);
+  
+  if (lastMovementDirection == LEFT) lastMovementDirection = RIGHT;
+  else if (lastMovementDirection == RIGHT) lastMovementDirection = LEFT;
+  else if (lastMovementDirection == STRAIGHT) lastMovementDirection = BACK;
+  else if (lastMovementDirection == BACK) lastMovementDirection = STRAIGHT;
+  
+  if (debug) Serial3.println("180 turn completed");
+}
+
+void fineTuneAlignment() {
+  setMotorSpeeds(80, 80);
+  delay(150);
+  
+  readAllSensors();
+  
+  if (leftBlackSensors > rightBlackSensors + 2) {
+    setMotorSpeeds(50, 100);
+    delay(50);
+  } else if (rightBlackSensors > leftBlackSensors + 2) {
+    setMotorSpeeds(100, 50);
+    delay(50);
+  }
+  
+  setMotorSpeeds(0, 0);
+  delay(50);
+}
+
+// ===================================================================
+//                      JUNCTION DETECTION
+// ===================================================================
+
+JunctionType detectJunctionType() {
+  readAllSensors();
+  
+  if (totalBlackSensors == 0) {
+    unsigned long startTime = millis();
+    while (millis() - startTime < 300) {
+      readAllSensors();
+      if (totalBlackSensors > 0) return NO_JUNCTION;
+      delay(10);
+    }
+    return DEAD_END;
+  }
+  
+  if (totalBlackSensors >= 6) {
+    float startX = currentX;
+    float startY = currentY;
+    
+    setMotorSpeeds(100, 100);
+    delay(250);
+    readAllSensors();
+    
+    JunctionType result = NO_JUNCTION;
+    
+    if (totalBlackSensors == 0) {
+      result = T_JUNCTION;
+    } else if (totalBlackSensors >= 5) {
+      result = FOUR_WAY;
+    } else {
+      result = NO_JUNCTION;
+    }
+    
+    setMotorSpeeds(-100, -100);
+    delay(250);
+    
+    currentX = startX;
+    currentY = startY;
+    
+    return result;
+  }
+  
+  if (leftBlackSensors >= 3 && rightBlackSensors <= 1) {
+    return LEFT_TURN;
+  }
+  
+  if (rightBlackSensors >= 3 && leftBlackSensors <= 1) {
+    return RIGHT_TURN;
+  }
+  
+  return NO_JUNCTION;
+}
+
+bool isDeadEnd() {
+  readAllSensors();
+  
+  if (totalBlackSensors == 0) {
+    unsigned long lostTime = millis();
+    
+    for (int attempt = 0; attempt < 3; attempt++) {
+      setMotorSpeeds(-100, 100);
+      delay(200);
+      readAllSensors();
+      if (totalBlackSensors > 0) return false;
+      
+      setMotorSpeeds(100, -100);
+      delay(400);
+      readAllSensors();
+      if (totalBlackSensors > 0) return false;
+      
+      setMotorSpeeds(-100, 100);
+      delay(200);
+    }
+    
+    return true;
+  }
+  
+  return false;
+}
+
+bool isLineLost() {
+  return (totalBlackSensors == 0);
+}
+
+// ===================================================================
+//                  IMPROVED JUNCTION RECOGNITION
+// ===================================================================
+
+bool isAtKnownJunctionEnhanced() {
+  if (currentPathIndex == 0) return false;
+  
+  if (millis() - lastJunctionTime < 2000) {
+    return false;
+  }
+  
+  JunctionType currentType = detectJunctionType();
+  if (currentType == NO_JUNCTION || currentType == DEAD_END) {
+    return false;
+  }
+  
+  for (int i = 0; i < currentPathIndex; i++) {
+    if (enhancedPathMemory[i].junctionType == DEAD_END ||
+        millis() - enhancedPathMemory[i].timestamp < 3000) {
+      continue;
+    }
+    
+    float distanceDiff = abs(totalDistanceTraveled - enhancedPathMemory[i].distanceFromStart);
+    float positionDiff = sqrt(pow(currentX - enhancedPathMemory[i].xPosition, 2) + 
+                             pow(currentY - enhancedPathMemory[i].yPosition, 2));
+    
+    float headingDiff = abs(currentHeading - enhancedPathMemory[i].headingAtJunction);
+    while (headingDiff > 180) headingDiff = 360 - headingDiff;
+    
+    bool typeMatches = (currentType == enhancedPathMemory[i].junctionType);
+    bool typeCompatible = false;
+    
+    if (currentType == T_JUNCTION && enhancedPathMemory[i].junctionType == FOUR_WAY) {
+      typeCompatible = true;
+    } else if (currentType == FOUR_WAY && enhancedPathMemory[i].junctionType == T_JUNCTION) {
+      typeCompatible = true;
+    } else if (currentType == LEFT_TURN && enhancedPathMemory[i].junctionType == RIGHT_TURN) {
+      typeCompatible = true;
+    } else if (currentType == RIGHT_TURN && enhancedPathMemory[i].junctionType == LEFT_TURN) {
+      typeCompatible = true;
+    }
+    
+    if (debug && distanceDiff < 200.0) {
+      Serial3.print("Check J");
+      Serial3.print(i);
+      Serial3.print("(#");
+      Serial3.print(enhancedPathMemory[i].nodeID);
+      Serial3.print("): distDiff=");
+      Serial3.print(distanceDiff, 1);
+      Serial3.print("cm, posDiff=");
+      Serial3.print(positionDiff, 1);
+      Serial3.print("cm, headDiff=");
+      Serial3.print(headingDiff, 1);
+      Serial3.print("°, typeMatch=");
+      Serial3.print(typeMatches);
+      Serial3.print(", typeCompat=");
+      Serial3.print(typeCompatible);
+      Serial3.println();
+    }
+    
+    bool distanceOk = (distanceDiff < JUNCTION_DISTANCE_TOLERANCE);
+    bool positionOk = (positionDiff < JUNCTION_POSITION_TOLERANCE);
+    bool headingOk = (headingDiff < 90.0);
+    bool typeOk = (typeMatches || typeCompatible);
+    
+    if (currentState == RETURNING && headingDiff > 90.0 && headingDiff < 270.0) {
+      headingOk = true;
+    }
+    
+    if (distanceOk && positionOk && headingOk && typeOk) {
+      if (debug) {
+        Serial3.print("*** MATCH FOUND! Junction #");
+        Serial3.print(enhancedPathMemory[i].nodeID);
+        Serial3.print(" (index ");
+        Serial3.print(i);
+        Serial3.println(")");
+      }
+      
+      currentJunctionIndex = i;
+      isAtKnownJunction = true;
+      lastJunctionTime = millis();
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// ===================================================================
+//                      ENHANCED MEMORY FUNCTIONS
+// ===================================================================
+
+void initializeEnhancedMemory() {
+  for (int i = 0; i < MAX_PATH_MEMORY; i++) {
+    enhancedPathMemory[i].junctionType = NO_JUNCTION;
+    enhancedPathMemory[i].takenDirection = UNKNOWN;
+    enhancedPathMemory[i].visited = false;
+    enhancedPathMemory[i].timestamp = 0;
+    enhancedPathMemory[i].nodeID = -1;
+    enhancedPathMemory[i].distanceFromStart = 0;
+    enhancedPathMemory[i].xPosition = 0;
+    enhancedPathMemory[i].yPosition = 0;
+    enhancedPathMemory[i].headingAtJunction = 0;
+    
+    for (int j = 0; j < 4; j++) {
+      enhancedPathMemory[i].explored[j] = false;
+      enhancedPathMemory[i].availableDirections[j] = UNKNOWN;
+      enhancedPathMemory[i].adjacentNodes[j] = -1;
+      enhancedPathMemory[i].distanceToAdjacent[j] = 0;
+    }
+    
+    enhancedBacktrackStack[i].junctionIndex = -1;
+    enhancedBacktrackStack[i].entryDirection = UNKNOWN;
+    enhancedBacktrackStack[i].distanceToJunction = 0;
+  }
+  
+  currentPathIndex = 0;
+  lastJunctionIndex = -1;
+  nodeCounter = 0;
+  backtrackTop = -1;
+  
+  currentX = 0;
+  currentY = 0;
+  currentHeading = 0;
+  totalDistanceTraveled = 0;
+  lastJunctionDistance = 0;
+  distanceSinceLastJunction = 0;
+  
+  if (debug) Serial3.println("Enhanced memory initialized");
+}
+
+void recordEnhancedJunction(JunctionType type, Direction taken) {
+  if (currentPathIndex >= MAX_PATH_MEMORY) {
+    Serial3.println("ERROR: Path memory full!");
+    return;
+  }
+  
+  if (isAtKnownJunctionEnhanced()) {
+    if (debug) {
+      Serial3.print("*** AT KNOWN JUNCTION #");
+      Serial3.print(enhancedPathMemory[currentJunctionIndex].nodeID);
+      Serial3.print(" (");
+      switch(enhancedPathMemory[currentJunctionIndex].junctionType) {
+        case T_JUNCTION: Serial3.print("T"); break;
+        case FOUR_WAY: Serial3.print("4"); break;
+        case LEFT_TURN: Serial3.print("L"); break;
+        case RIGHT_TURN: Serial3.print("R"); break;
+        default: Serial3.print("?"); break;
+      }
+      Serial3.println(")");
+    }
+    
+    markEnhancedDirectionExplored(currentJunctionIndex, taken);
+    enhancedPathMemory[currentJunctionIndex].timestamp = millis();
+    
+    lastJunctionIndex = currentJunctionIndex;
+    lastJunctionType = type;
+    lastJunctionDirectionTaken = taken;
+    lastJunctionDistance = totalDistanceTraveled;
+    
+    if (taken != BACK) {
+      Direction oppositeDir = getOppositeDirection(taken);
+      pushEnhancedBacktrack(currentJunctionIndex, oppositeDir);
+      
+      if (debug) {
+        Serial3.print("Marked direction ");
+        switch(taken) {
+          case LEFT: Serial3.print("LEFT"); break;
+          case RIGHT: Serial3.print("RIGHT"); break;
+          case STRAIGHT: Serial3.print("STRAIGHT"); break;
+          case BACK: Serial3.print("BACK"); break;
+        }
+        Serial3.print(" as explored at J");
+        Serial3.print(currentJunctionIndex);
+        Serial3.println();
+      }
+    }
+    
+    return;
+  }
+  
+  if (lastJunctionIndex >= 0) {
+    float distanceFromLast = totalDistanceTraveled - enhancedPathMemory[lastJunctionIndex].distanceFromStart;
+    if (distanceFromLast < MIN_JUNCTION_DISTANCE) {
+      if (debug) {
+        Serial3.print("Too close (");
+        Serial3.print(distanceFromLast, 1);
+        Serial3.println("cm) - updating last junction");
+      }
+      
+      markEnhancedDirectionExplored(lastJunctionIndex, taken);
+      enhancedPathMemory[lastJunctionIndex].takenDirection = taken;
+      enhancedPathMemory[lastJunctionIndex].timestamp = millis();
+      
+      if (taken != BACK) {
+        Direction oppositeDir = getOppositeDirection(taken);
+        pushEnhancedBacktrack(lastJunctionIndex, oppositeDir);
+      }
+      
+      return;
+    }
+  }
+  
+  enhancedPathMemory[currentPathIndex].junctionType = type;
+  enhancedPathMemory[currentPathIndex].takenDirection = taken;
+  enhancedPathMemory[currentPathIndex].visited = true;
+  enhancedPathMemory[currentPathIndex].timestamp = millis();
+  enhancedPathMemory[currentPathIndex].nodeID = nodeCounter++;
+  enhancedPathMemory[currentPathIndex].distanceFromStart = totalDistanceTraveled;
+  enhancedPathMemory[currentPathIndex].xPosition = currentX;
+  enhancedPathMemory[currentPathIndex].yPosition = currentY;
+  enhancedPathMemory[currentPathIndex].headingAtJunction = currentHeading;
+  
+  for (int i = 0; i < 4; i++) {
+    enhancedPathMemory[currentPathIndex].availableDirections[i] = UNKNOWN;
+    enhancedPathMemory[currentPathIndex].adjacentNodes[i] = -1;
+    enhancedPathMemory[currentPathIndex].distanceToAdjacent[i] = 0;
+  }
+  
+  switch(type) {
+    case RIGHT_TURN:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = RIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[1] = BACK;
+      break;
+    case LEFT_TURN:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = LEFT;
+      enhancedPathMemory[currentPathIndex].availableDirections[1] = BACK;
+      break;
+    case T_JUNCTION:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = LEFT;
+      enhancedPathMemory[currentPathIndex].availableDirections[1] = RIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[2] = STRAIGHT;
+      break;
+    case FOUR_WAY:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = LEFT;
+      enhancedPathMemory[currentPathIndex].availableDirections[1] = RIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[2] = STRAIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[3] = BACK;
+      break;
+    case DEAD_END:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = BACK;
+      break;
+    default:
+      enhancedPathMemory[currentPathIndex].availableDirections[0] = LEFT;
+      enhancedPathMemory[currentPathIndex].availableDirections[1] = RIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[2] = STRAIGHT;
+      enhancedPathMemory[currentPathIndex].availableDirections[3] = BACK;
+      break;
+  }
+  
+  markEnhancedDirectionExplored(currentPathIndex, taken);
+  
+  if (lastJunctionIndex >= 0) {
+    Direction fromPreviousDir = getOppositeDirection(taken);
+    
+    for (int i = 0; i < 4; i++) {
+      if (enhancedPathMemory[lastJunctionIndex].availableDirections[i] == fromPreviousDir) {
+        enhancedPathMemory[lastJunctionIndex].adjacentNodes[i] = currentPathIndex;
+        enhancedPathMemory[lastJunctionIndex].distanceToAdjacent[i] = distanceSinceLastJunction;
+        
+        int currentDirIndex = getDirectionIndex(taken);
+        if (currentDirIndex >= 0) {
+          enhancedPathMemory[currentPathIndex].adjacentNodes[currentDirIndex] = lastJunctionIndex;
+          enhancedPathMemory[currentPathIndex].distanceToAdjacent[currentDirIndex] = distanceSinceLastJunction;
+        }
+        break;
+      }
+    }
+  }
+  
+  if (taken != BACK || currentState != RETURNING) {
+    Direction oppositeDir = getOppositeDirection(taken);
+    pushEnhancedBacktrack(currentPathIndex, oppositeDir);
+  }
+  
+  lastJunctionIndex = currentPathIndex;
+  lastJunctionType = type;
+  lastJunctionDirectionTaken = taken;
+  lastJunctionDistance = totalDistanceTraveled;
+  currentJunctionIndex = currentPathIndex;
+  
+  distanceSinceLastJunction = 0;
+  
+  if (debug) {
+    Serial3.print(">>> NEW JUNCTION #");
+    Serial3.print(enhancedPathMemory[currentPathIndex].nodeID);
+    Serial3.print(" at ");
+    Serial3.print(totalDistanceTraveled, 1);
+    Serial3.print("cm, Type=");
+    switch(type) {
+      case T_JUNCTION: Serial3.print("T"); break;
+      case FOUR_WAY: Serial3.print("4"); break;
+      case LEFT_TURN: Serial3.print("L"); break;
+      case RIGHT_TURN: Serial3.print("R"); break;
+      case DEAD_END: Serial3.print("DEAD"); break;
+      default: Serial3.print("?"); break;
+    }
+    Serial3.print(", Dir=");
+    switch(taken) {
+      case LEFT: Serial3.print("L"); break;
+      case RIGHT: Serial3.print("R"); break;
+      case STRAIGHT: Serial3.print("S"); break;
+      case BACK: Serial3.print("B"); break;
+      default: Serial3.print("?"); break;
+    }
+    Serial3.println();
+  }
+  
+  currentPathIndex++;
+}
+
+void markEnhancedDirectionExplored(int junctionIndex, Direction direction) {
+  if (junctionIndex < 0 || junctionIndex >= currentPathIndex) {
+    return;
+  }
+  
+  int dirIndex = getDirectionIndex(direction);
+  if (dirIndex >= 0 && dirIndex < 4) {
+    enhancedPathMemory[junctionIndex].explored[dirIndex] = true;
+  }
+}
+
+bool isEnhancedDirectionExplored(int junctionIndex, Direction direction) {
+  if (junctionIndex < 0 || junctionIndex >= currentPathIndex) {
+    return false;
+  }
+  
+  int dirIndex = getDirectionIndex(direction);
+  if (dirIndex >= 0 && dirIndex < 4) {
+    return enhancedPathMemory[junctionIndex].explored[dirIndex];
+  }
+  
+  return false;
+}
+
+void handleDeadEnd() {
+  if (debug) Serial3.println("=== DEAD END DETECTED ===");
+  
+  digitalWrite(red, HIGH);
+  
+  recordEnhancedJunction(DEAD_END, BACK);
+  
+  setMotorSpeeds(0, 0);
+  delay(500);
+  
+  if (debug) Serial3.println("Executing 180° turn");
+  
+  execute180Turn();
+  
+  currentState = RETURNING;
+  deadEndDetected = true;
+  
+  if (debug) {
+    Serial3.print("Backtrack stack items: ");
+    Serial3.println(backtrackTop + 1);
+  }
+  
+  digitalWrite(red, LOW);
+}
+
+// ===================================================================
+//                  IMPROVED BACKTRACK STACK MANAGEMENT
+// ===================================================================
+
+void pushEnhancedBacktrack(int junctionIndex, Direction entryDir) {
+  if (backtrackTop < MAX_PATH_MEMORY - 1) {
+    backtrackTop++;
+    enhancedBacktrackStack[backtrackTop].junctionIndex = junctionIndex;
+    enhancedBacktrackStack[backtrackTop].entryDirection = entryDir;
+    enhancedBacktrackStack[backtrackTop].distanceToJunction = distanceSinceLastJunction;
+    
+    if (debug) {
+      Serial3.print(">>> Pushed to backtrack stack [");
+      Serial3.print(backtrackTop);
+      Serial3.print("]: J");
+      Serial3.print(junctionIndex);
+      Serial3.print(" (entry: ");
+      switch(entryDir) {
+        case LEFT: Serial3.print("LEFT"); break;
+        case RIGHT: Serial3.print("RIGHT"); break;
+        case STRAIGHT: Serial3.print("STRAIGHT"); break;
+        case BACK: Serial3.print("BACK"); break;
+      }
+      Serial3.print(", dist: ");
+      Serial3.print(distanceSinceLastJunction);
+      Serial3.println(" cm)");
+    }
+  }
+}
+
+bool popEnhancedBacktrack(int &junctionIndex, Direction &entryDir, float &distance) {
+  if (backtrackTop >= 0) {
+    junctionIndex = enhancedBacktrackStack[backtrackTop].junctionIndex;
+    entryDir = enhancedBacktrackStack[backtrackTop].entryDirection;
+    distance = enhancedBacktrackStack[backtrackTop].distanceToJunction;
+    
+    if (debug) {
+      Serial3.print("<<< Popped from backtrack stack [");
+      Serial3.print(backtrackTop);
+      Serial3.print("]: J");
+      Serial3.print(junctionIndex);
+      Serial3.print(" (dist: ");
+      Serial3.print(distance);
+      Serial3.println(" cm)");
+    }
+    
+    backtrackTop--;
+    return true;
+  }
+  return false;
+}
+
+// ===================================================================
+//                  IMPROVED NAVIGATION DECISION
+// ===================================================================
+
+Direction chooseEnhancedNextDirection(JunctionType junction, int junctionIndex) {
+  if (junction == DEAD_END) {
+    return BACK;
+  }
+  
+  if (isAtKnownJunction && junctionIndex >= 0) {
+    if (debug) {
+      Serial3.print("At KNOWN J");
+      Serial3.print(junctionIndex);
+      Serial3.print("(#");
+      Serial3.print(enhancedPathMemory[junctionIndex].nodeID);
+      Serial3.print(") - Explored: [");
+      for (int i = 0; i < 4; i++) {
+        if (enhancedPathMemory[junctionIndex].explored[i]) {
+          switch(i) {
+            case 0: Serial3.print("S"); break;
+            case 1: Serial3.print("L"); break;
+            case 2: Serial3.print("R"); break;
+            case 3: Serial3.print("B"); break;
+          }
+        } else {
+          Serial3.print("_");
+        }
+      }
+      Serial3.println("]");
+    }
+    
+    Direction priorityOrder[] = {RIGHT, STRAIGHT, LEFT, BACK};
+    
+    for (int i = 0; i < 4; i++) {
+      Direction dir = priorityOrder[i];
+      
+      bool directionAvailable = false;
+      for (int j = 0; j < 4; j++) {
+        if (enhancedPathMemory[junctionIndex].availableDirections[j] == dir) {
+          directionAvailable = true;
+          break;
+        }
+      }
+      
+      bool alreadyExplored = isEnhancedDirectionExplored(junctionIndex, dir);
+      
+      if (directionAvailable && !alreadyExplored) {
+        if (debug) {
+          Serial3.print("Choosing UNEXPLORED: ");
+          switch(dir) {
+            case LEFT: Serial3.println("LEFT"); break;
+            case RIGHT: Serial3.println("RIGHT"); break;
+            case STRAIGHT: Serial3.println("STRAIGHT"); break;
+            case BACK: Serial3.println("BACK"); break;
+          }
+        }
+        return dir;
+      }
+    }
+    
+    if (debug) {
+      Serial3.println("ALL directions explored - BACKTRACKING");
+    }
+    return BACK;
+  }
+  
+  if (debug) Serial3.println("NEW junction - Right-hand rule");
+  
+  switch(junction) {
+    case T_JUNCTION:
+    case FOUR_WAY:
+      return RIGHT;
+    case LEFT_TURN:
+      return LEFT;
+    case RIGHT_TURN:
+      return RIGHT;
+    default:
+      return STRAIGHT;
+  }
+}
+
+// ===================================================================
+//                  IMPROVED HANDLE JUNCTION
+// ===================================================================
+
+void handleEnhancedJunction(JunctionType type) {
+  if (debug) {
+    Serial3.print("=== HANDLE JUNCTION: ");
+    switch(type) {
+      case T_JUNCTION: Serial3.println("T"); break;
+      case FOUR_WAY: Serial3.println("4"); break;
+      case LEFT_TURN: Serial3.println("L"); break;
+      case RIGHT_TURN: Serial3.println("R"); break;
+      case DEAD_END: Serial3.println("DEAD"); break;
+      default: Serial3.println("?"); break;
+    }
+  }
+  
+  if (type == DEAD_END) {
+    handleDeadEnd();
+    return;
+  }
+  
+  setMotorSpeeds(0, 0);
+  delay(200);
+  updateDistance();
+  
+  Direction chosenDirection = chooseEnhancedNextDirection(type, currentJunctionIndex);
+  
+  if (debug) {
+    Serial3.print("Chosen: ");
+    switch(chosenDirection) {
+      case LEFT: Serial3.println("LEFT"); break;
+      case RIGHT: Serial3.println("RIGHT"); break;
+      case STRAIGHT: Serial3.println("STRAIGHT"); break;
+      case BACK: Serial3.println("BACK"); break;
+    }
+  }
+  
+  recordEnhancedJunction(type, chosenDirection);
+  updateHeadingForTurn(chosenDirection);
+  executeTurn(chosenDirection);
+  
+  if (chosenDirection == BACK) {
+    currentState = RETURNING;
+  } else {
+    currentState = EXPLORING;
+  }
+  
+  lastJunctionDistance = totalDistanceTraveled;
+  distanceSinceLastJunction = 0;
+}
+
+// ===================================================================
+//                  IMPROVED RETURN TO JUNCTION
+// ===================================================================
+
+void enhancedReturnToLastJunction() {
+  if (backtrackTop < 0) {
+    if (debug) Serial3.println("Backtrack stack empty - switching to EXPLORING");
+    currentState = EXPLORING;
+    return;
+  }
+  
+  digitalWrite(blue, HIGH);
+  
+  int targetJunctionIndex;
+  Direction entryDirection;
+  float distanceToJunction;
+  
+  if (popEnhancedBacktrack(targetJunctionIndex, entryDirection, distanceToJunction)) {
+    if (debug) {
+      Serial3.print("Returning to junction #");
+      Serial3.print(enhancedPathMemory[targetJunctionIndex].nodeID);
+      Serial3.print(" (approx ");
+      Serial3.print(distanceToJunction);
+      Serial3.println(" cm)");
+    }
+    
+    float startDistance = totalDistanceTraveled;
+    bool junctionFound = false;
+    
+    while (!junctionFound && (totalDistanceTraveled - startDistance) < (distanceToJunction * 1.5)) {
+      followLine();
+      updateDistance();
+      
+      JunctionType detected = detectJunctionType();
+      if (detected != NO_JUNCTION && detected != DEAD_END) {
+        if (isAtKnownJunctionEnhanced()) {
+          setMotorSpeeds(0, 0);
+          delay(200);
+          
+          currentState = AT_JUNCTION;
+          junctionFound = true;
+          
+          if (debug) {
+            Serial3.print("Reached junction #");
+            Serial3.print(enhancedPathMemory[currentJunctionIndex].nodeID);
+            Serial3.println(" during return");
+          }
+          break;
+        }
+      }
+      
+      if (millis() - lastJunctionTime > 10000) {
+        if (debug) Serial3.println("Return timeout");
+        break;
+      }
+      
+      delay(10);
+    }
+    
+    if (!junctionFound) {
+      if (debug) Serial3.println("Junction not found during return");
+      currentState = EXPLORING;
+    }
+  } else {
+    if (debug) Serial3.println("Failed to get junction from backtrack stack");
+    currentState = EXPLORING;
+  }
+  
+  digitalWrite(blue, LOW);
+}
+
+// ===================================================================
+//                      ENHANCED NAVIGATION
+// ===================================================================
+
+void enhancedNavigate() {
+  updateDistance();
+  
+  switch(currentState) {
+    case EXPLORING:
+      followLine();
+      
+      static unsigned long lastJunctionCheck = 0;
+      if (millis() - lastJunctionCheck > 150) {
+        JunctionType detected = detectJunctionType();
+        if (detected != NO_JUNCTION) {
+          if (debug) {
+            Serial3.print("Junction detected: ");
+            switch(detected) {
+              case T_JUNCTION: Serial3.println("T-JUNCTION"); break;
+              case FOUR_WAY: Serial3.println("4-WAY"); break;
+              case LEFT_TURN: Serial3.println("LEFT_TURN"); break;
+              case RIGHT_TURN: Serial3.println("RIGHT_TURN"); break;
+              case DEAD_END: Serial3.println("DEAD_END"); break;
+              default: Serial3.println("UNKNOWN"); break;
+            }
+          }
+          
+          setMotorSpeeds(0, 0);
+          delay(200);
+          handleEnhancedJunction(detected);
+        }
+        lastJunctionCheck = millis();
+      }
+      
+      if (isLineLost()) {
+        if (lineLostStart == 0) {
+          lineLostStart = millis();
+        } else if (millis() - lineLostStart > lineLostTimeout) {
+          handleDeadEnd();
+          lineLostStart = 0;
+        }
+      } else {
+        lineLostStart = 0;
+      }
+      break;
+      
+    case RETURNING:
+      enhancedReturnToLastJunction();
+      break;
+      
+    case AT_JUNCTION:
+      readAllSensors();
+      JunctionType type = detectJunctionType();
+      if (type != NO_JUNCTION) {
+        handleEnhancedJunction(type);
+      } else {
+        setMotorSpeeds(150, 150);
+        delay(200);
+        currentState = EXPLORING;
+      }
+      break;
+      
+    case TURNING:
+      break;
+  }
+}
+
+// ===================================================================
+//                      PRINT ENHANCED PATH MEMORY
+// ===================================================================
+
+void printEnhancedPathMemory() {
+  Serial3.println("=== ENHANCED PATH MEMORY ===");
+  Serial3.println("ID | Type          | Dist(cm) | Position    | Heading | Explored");
+  Serial3.println("---|---------------|----------|-------------|---------|----------");
+  
+  for (int i = 0; i < currentPathIndex; i++) {
+    if (enhancedPathMemory[i].junctionType != NO_JUNCTION) {
+      Serial3.print(enhancedPathMemory[i].nodeID);
+      Serial3.print(" | ");
+      
+      switch(enhancedPathMemory[i].junctionType) {
+        case T_JUNCTION: Serial3.print("T-JUNCTION    "); break;
+        case FOUR_WAY: Serial3.print("4-WAY         "); break;
+        case LEFT_TURN: Serial3.print("LEFT_TURN     "); break;
+        case RIGHT_TURN: Serial3.print("RIGHT_TURN    "); break;
+        case DEAD_END: Serial3.print("DEAD_END      "); break;
+        default: Serial3.print("UNKNOWN       "); break;
+      }
+      Serial3.print(" | ");
+      
+      Serial3.print(enhancedPathMemory[i].distanceFromStart);
+      Serial3.print("    | ");
+      
+      Serial3.print("(");
+      Serial3.print(enhancedPathMemory[i].xPosition);
+      Serial3.print(",");
+      Serial3.print(enhancedPathMemory[i].yPosition);
+      Serial3.print(") | ");
+      
+      Serial3.print(enhancedPathMemory[i].headingAtJunction);
+      Serial3.print("°   | ");
+      
+      Serial3.print("[");
+      Serial3.print(enhancedPathMemory[i].explored[0] ? "S" : "_");
+      Serial3.print(enhancedPathMemory[i].explored[1] ? "L" : "_");
+      Serial3.print(enhancedPathMemory[i].explored[2] ? "R" : "_");
+      Serial3.print(enhancedPathMemory[i].explored[3] ? "B" : "_");
+      Serial3.println("]");
+      
+      Serial3.print("  Adjacent: ");
+      for (int j = 0; j < 4; j++) {
+        if (enhancedPathMemory[i].adjacentNodes[j] != -1) {
+          Serial3.print("[");
+          switch(j) {
+            case 0: Serial3.print("S"); break;
+            case 1: Serial3.print("L"); break;
+            case 2: Serial3.print("R"); break;
+            case 3: Serial3.print("B"); break;
+          }
+          Serial3.print("->");
+          Serial3.print(enhancedPathMemory[i].adjacentNodes[j]);
+          Serial3.print(":");
+          Serial3.print(enhancedPathMemory[i].distanceToAdjacent[j]);
+          Serial3.print("cm] ");
+        }
+      }
+      Serial3.println();
+    }
+  }
+  
+  Serial3.println("===============================");
+}
+
+// ===================================================================
+//                      CALIBRATION FUNCTIONS
+// ===================================================================
+
+void calibrateEncodersInteractive() {
+  Serial3.println("=== INTERACTIVE ENCODER CALIBRATION ===");
+  Serial3.println("1. Measure wheel diameter (in cm)");
+  Serial3.println("   Command: wheel:6.5");
+  Serial3.println("2. Count encoder ticks per revolution");
+  Serial3.println("   a. Lift robot so wheels can spin freely");
+  Serial3.println("   b. Mark wheel at one point");
+  Serial3.println("   c. Rotate wheel ONE complete revolution");
+  Serial3.println("   d. Count how many times encoder triggers");
+  Serial3.println("   Command: ticks:20");
+  Serial3.println("3. Test calibration:");
+  Serial3.println("   a. Place robot on ground");
+  Serial3.println("   b. Mark start point");
+  Serial3.println("   c. Command: testcal:100 (move 100cm)");
+  Serial3.println("   d. Measure actual distance moved");
+  Serial3.println("   e. Adjust wheel/ticks values as needed");
+  Serial3.println("================================");
+}
+
+void testCalibration(float targetDistance) {
+  Serial3.print("Testing calibration - moving ");
+  Serial3.print(targetDistance);
+  Serial3.println(" cm");
+  
+  totalDistanceTraveled = 0;
+  leftEncoderCount = 0;
+  rightEncoderCount = 0;
+  
+  setMotorSpeeds(150, 150);
+  
+  float startTime = millis();
+  while (totalDistanceTraveled < targetDistance && millis() - startTime < 10000) {
+    updateDistance();
+    delay(50);
+  }
+  
+  setMotorSpeeds(0, 0);
+  
+  Serial3.print("Target: ");
+  Serial3.print(targetDistance);
+  Serial3.print(" cm, Actual: ");
+  Serial3.print(totalDistanceTraveled);
+  Serial3.print(" cm, Error: ");
+  Serial3.print(totalDistanceTraveled - targetDistance);
+  Serial3.println(" cm");
+  
+  if (abs(totalDistanceTraveled - targetDistance) > 5.0) {
+    Serial3.println("CALIBRATION NEEDS ADJUSTMENT!");
+    Serial3.print("Current: wheel:");
+    Serial3.print(wheelDiameter);
+    Serial3.print(", ticks:");
+    Serial3.println(encoderTicksPerRevolution);
+    Serial3.println("Adjust with: wheel:X.X or ticks:XX");
+  }
+}
+
+// ===================================================================
+//                      MAIN LOOP
+// ===================================================================
+
+void loop() {
+  handleButton();
+  readSerial3();
+  
+  if (!run) {
+    setMotorSpeeds(0, 0);
+    return;
+  }
+  
+  readAllSensors();
+  enhancedNavigate();
+  
+  if (debug && millis() - lastDebugTime > 1000) {
+    Serial3.print("=== STATE: ");
+    switch(currentState) {
+      case EXPLORING: Serial3.print("EXPLORE"); break;
+      case RETURNING: Serial3.print("RETURN"); break;
+      case AT_JUNCTION: Serial3.print("AT_JUNC"); break;
+      case TURNING: Serial3.print("TURN"); break;
+    }
+    
+    Serial3.print(" | Dist: ");
+    Serial3.print(totalDistanceTraveled, 1);
+    Serial3.print("cm");
+    
+    Serial3.print(" | SinceJunc: ");
+    Serial3.print(distanceSinceLastJunction, 1);
+    Serial3.print("cm");
+    
+    Serial3.print(" | Heading: ");
+    Serial3.print(currentHeading, 0);
+    Serial3.print("°");
+    
+    Serial3.print(" | Memory: ");
+    Serial3.print(currentPathIndex);
+    Serial3.print("/");
+    Serial3.print(MAX_PATH_MEMORY);
+    
+    Serial3.print(" | Backtrack: ");
+    Serial3.print(backtrackTop + 1);
+    
+    if (isAtKnownJunction && currentJunctionIndex >= 0) {
+      Serial3.print(" | AtJ");
+      Serial3.print(currentJunctionIndex);
+      Serial3.print("(#");
+      Serial3.print(enhancedPathMemory[currentJunctionIndex].nodeID);
+      Serial3.print(")");
+    }
+    
+    Serial3.println();
+    
+    lastDebugTime = millis();
+  }
+}
+
+// ===================================================================
+//                      BUTTON HANDLING
+// ===================================================================
+
+void handleButton() {
+  static unsigned long lastDebounceTime = 0;
+  static const unsigned long debounceDelay = 50;
+  static bool lastButtonState = HIGH, buttonState = HIGH;
+  int reading = digitalRead(buttonPin);
+  
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading != buttonState) {
+      buttonState = reading;
+      
+      if (buttonState == LOW) {
+        run = !run;
+        
+        if (run) {
+          Serial3.println("Robot STARTED");
+          digitalWrite(green, HIGH);
+          delay(200);
+          digitalWrite(green, LOW);
+        } else {
+          Serial3.println("Robot STOPPED");
+          digitalWrite(red, HIGH);
+          delay(200);
+          digitalWrite(red, LOW);
+          
+          printEnhancedPathMemory();
+          lastError = 0;
+          intgralError = 0;
+        }
+      }
+    }
+  }
+  
+  lastButtonState = reading;
+}
+
+// ===================================================================
+//                      SERIAL COMMAND HANDLING
+// ===================================================================
+
+void readSerial3() {
+  static String input = "";
+  
+  while (Serial3.available()) {
+    char c = Serial3.read();
+    
+    if (c == '\n') {
+      input.trim();
+      
+      if (input.startsWith("kp:")) Kp = input.substring(3).toFloat();
+      else if (input.startsWith("kd:")) Kd = input.substring(3).toFloat();
+      else if (input.startsWith("ki:")) Ki = input.substring(3).toFloat();
+      
+      else if (input.startsWith("p0:")) pos0 = input.substring(3).toInt();
+      else if (input.startsWith("p1:")) pos1 = input.substring(3).toInt();
+      else if (input.startsWith("p2:")) pos2 = input.substring(3).toInt();
+      else if (input.startsWith("p3:")) pos3 = input.substring(3).toInt();
+      else if (input.startsWith("p4:")) pos4 = input.substring(3).toInt();
+      
+      else if (input.startsWith("base:")) base_speed = input.substring(5).toInt();
+      else if (input.startsWith("max:")) maxSpeed = input.substring(4).toInt();
+      
+      else if (input.startsWith("wheel:")) {
+        wheelDiameter = input.substring(6).toFloat();
+        wheelCircumference = PI * wheelDiameter;
+        cmPerTick = wheelCircumference / encoderTicksPerRevolution;
+        Serial3.print("Wheel diameter set to ");
+        Serial3.print(wheelDiameter);
+        Serial3.println(" cm");
+      }
+      else if (input.startsWith("ticks:")) {
+        encoderTicksPerRevolution = input.substring(6).toInt();
+        cmPerTick = wheelCircumference / encoderTicksPerRevolution;
+        Serial3.print("Ticks per revolution set to ");
+        Serial3.println(encoderTicksPerRevolution);
+      }
+      
+      else if (input.startsWith("testcal:")) {
+        float dist = input.substring(8).toFloat();
+        testCalibration(dist);
+      }
+      else if (input == "calhelp") {
+        calibrateEncodersInteractive();
+      }
+      else if (input == "resetcal") {
+        wheelDiameter = 6.5;
+        encoderTicksPerRevolution = 20;
+        wheelCircumference = PI * wheelDiameter;
+        cmPerTick = wheelCircumference / encoderTicksPerRevolution;
+        Serial3.println("Calibration reset to defaults");
+        Serial3.print("wheel:");
+        Serial3.print(wheelDiameter);
+        Serial3.print(", ticks:");
+        Serial3.println(encoderTicksPerRevolution);
+      }
+      else if (input == "emem") {
+        printEnhancedPathMemory();
+      }
+      else if (input == "pos") {
+        Serial3.print("Current Position: (");
+        Serial3.print(currentX);
+        Serial3.print(", ");
+        Serial3.print(currentY);
+        Serial3.print("), Heading: ");
+        Serial3.print(currentHeading);
+        Serial3.print("°, Distance: ");
+        Serial3.print(totalDistanceTraveled);
+        Serial3.println(" cm");
+      }
+      else if (input == "dist") {
+        Serial3.print("Total distance: ");
+        Serial3.print(totalDistanceTraveled, 1);
+        Serial3.print(" cm, Since last junction: ");
+        Serial3.print(distanceSinceLastJunction, 1);
+        Serial3.println(" cm");
+      }
+      else if (input == "encoders") {
+        Serial3.print("Left encoder: ");
+        Serial3.print(leftEncoderCount);
+        Serial3.print(", Right encoder: ");
+        Serial3.println(rightEncoderCount);
+      }
+      else if (input == "resetpos") {
+        currentX = 0;
+        currentY = 0;
+        totalDistanceTraveled = 0;
+        Serial3.println("Position reset to (0,0)");
+      }
+      else if (input == "clear") {
+        initializeEnhancedMemory();
+        Serial3.println("Memory cleared");
+      }
+      else if (input == "state") {
+        Serial3.print("Current state: ");
+        switch(currentState) {
+          case EXPLORING: Serial3.println("EXPLORING"); break;
+          case RETURNING: Serial3.println("RETURNING"); break;
+          case AT_JUNCTION: Serial3.println("AT_JUNCTION"); break;
+          case TURNING: Serial3.println("TURNING"); break;
+        }
+      }
+      
+      else if (input == "getall") {
+        String out = "";
+        out += "Kp:" + String(Kp) + ",";
+        out += "Kd:" + String(Kd) + ",";
+        out += "Ki:" + String(Ki) + ",";
+        out += "pos0:" + String(pos0) + ",";
+        out += "pos1:" + String(pos1) + ",";
+        out += "pos2:" + String(pos2) + ",";
+        out += "pos3:" + String(pos3) + ",";
+        out += "pos4:" + String(pos4) + ",";
+        out += "base:" + String(base_speed) + ",";
+        out += "max:" + String(maxSpeed) + ",";
+        out += "wheel:" + String(wheelDiameter) + ",";
+        out += "ticks:" + String(encoderTicksPerRevolution) + ",";
+        out += "memory:" + String(currentPathIndex) + "/" + String(MAX_PATH_MEMORY);
+        
+        Serial3.println(out);
+      }
+      
+      else if (input == "help" || input == "?") {
+        Serial3.println("=== COMMANDS ===");
+        Serial3.println("kp:value, kd:value, ki:value - Set PID");
+        Serial3.println("p0:value, p1:value, etc. - Set position weights");
+        Serial3.println("base:value - Set base speed");
+        Serial3.println("max:value - Set max speed");
+        Serial3.println("wheel:value - Set wheel diameter (cm)");
+        Serial3.println("ticks:value - Set encoder ticks per revolution");
+        Serial3.println("testcal:100 - Test calibration by moving 100cm");
+        Serial3.println("calhelp - Encoder calibration guide");
+        Serial3.println("resetcal - Reset calibration to defaults");
+        Serial3.println("emem - Print enhanced path memory");
+        Serial3.println("pos - Show current position");
+        Serial3.println("dist - Show distance info");
+        Serial3.println("encoders - Show encoder counts");
+        Serial3.println("resetpos - Reset position to (0,0)");
+        Serial3.println("clear - Clear memory");
+        Serial3.println("state - Show current state");
+        Serial3.println("getall - Get all parameters");
+        Serial3.println("help/? - Show this help");
+        Serial3.println("=================");
+      }
+      
+      // UPDATE pos[] ARRAY
+      pos[0] = pos0;
+      pos[1] = pos1;
+      pos[2] = pos2;
+      pos[3] = pos3;
+      pos[4] = pos4;
+      pos[5] = -pos4;
+      pos[6] = -pos3;
+      pos[7] = -pos2;
+      pos[8] = -pos1;
+      pos[9] = -pos0;
+      
+      if (input != "getall" && input != "emem" && input != "pos" && input != "dist" && 
+          input != "encoders" && input != "testcal" && input != "calhelp" && input != "resetcal" &&
+          input != "resetpos" && input != "clear" && input != "state" && input != "help" && input != "?") {
+        Serial3.print("Updated: ");
+        Serial3.println(input);
+      }
+      
+      input = "";
+    } else {
+      input += c;
+    }
+  }
+}
